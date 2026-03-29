@@ -1,5 +1,6 @@
 use super::models::*;
 use chrono::Utc;
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use md5;
 
@@ -1574,11 +1575,19 @@ impl Repository {
     /// Upsert a time entry
     pub async fn upsert_time_entry(&self, input: &TimeEntryInput) -> anyhow::Result<i64> {
         let now = Utc::now().to_rfc3339();
-        let clock_in = chrono::DateTime::from_timestamp_millis(input.clock_in)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| now.clone());
+
+        // Check if time rounding is enabled
+        let rounding = self.get_time_rounding_config().await;
+
+        let clock_in_dt = chrono::DateTime::from_timestamp_millis(input.clock_in)
+            .unwrap_or_else(|| Utc::now());
+        let clock_in_dt = if rounding.0 { round_time(clock_in_dt, rounding.1) } else { clock_in_dt };
+        let clock_in = clock_in_dt.to_rfc3339();
+
         let clock_out = input.clock_out.and_then(|ts| {
-            chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339())
+            chrono::DateTime::from_timestamp_millis(ts).map(|dt| {
+                if rounding.0 { round_time(dt, rounding.1).to_rfc3339() } else { dt.to_rfc3339() }
+            })
         });
 
         let result = sqlx::query(
@@ -2362,4 +2371,27 @@ impl Repository {
             total_cabinets: total_cabinets.0,
         })
     }
+
+    /// Get time rounding config from settings (returns (enabled, interval_minutes))
+    async fn get_time_rounding_config(&self) -> (bool, i32) {
+        match self.get_setting("time_rounding").await {
+            Ok(Some(json_str)) => {
+                #[derive(Deserialize)]
+                struct Cfg { enabled: bool, interval_minutes: i32 }
+                match serde_json::from_str::<Cfg>(&json_str) {
+                    Ok(cfg) => (cfg.enabled, cfg.interval_minutes.max(1)),
+                    Err(_) => (false, 15),
+                }
+            }
+            _ => (false, 15),
+        }
+    }
+}
+
+/// Round a DateTime to the nearest N minutes
+fn round_time(dt: chrono::DateTime<Utc>, interval_minutes: i32) -> chrono::DateTime<Utc> {
+    let secs = interval_minutes as i64 * 60;
+    let ts = dt.timestamp();
+    let rounded = ((ts + secs / 2) / secs) * secs;
+    chrono::DateTime::from_timestamp(rounded, 0).unwrap_or(dt)
 }

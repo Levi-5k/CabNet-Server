@@ -2315,3 +2315,63 @@ pub async fn set_room_items(
 
     Ok(Json(ApiResponse::success(items)))
 }
+
+// ==================== TIME ROUNDING CONFIG ====================
+
+const TIME_ROUNDING_SETTING_KEY: &str = "time_rounding";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeRoundingConfig {
+    pub enabled: bool,
+    pub interval_minutes: i32,
+}
+
+impl Default for TimeRoundingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: 15,
+        }
+    }
+}
+
+/// GET /api/settings/time-rounding - Get the time rounding config
+pub async fn get_time_rounding(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<TimeRoundingConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let config = match state.repo.get_setting(TIME_ROUNDING_SETTING_KEY).await {
+        Ok(Some(json_str)) => {
+            serde_json::from_str::<TimeRoundingConfig>(&json_str)
+                .unwrap_or_default()
+        }
+        _ => TimeRoundingConfig::default(),
+    };
+
+    Ok(Json(ApiResponse::success(config)))
+}
+
+/// PUT /api/settings/time-rounding - Update the time rounding config (admin)
+pub async fn set_time_rounding(
+    State(state): State<SharedState>,
+    Json(config): Json<TimeRoundingConfig>,
+) -> Result<Json<ApiResponse<TimeRoundingConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    // Clamp interval to sensible range (1-60 minutes)
+    let config = TimeRoundingConfig {
+        enabled: config.enabled,
+        interval_minutes: config.interval_minutes.clamp(1, 60),
+    };
+
+    let json_str = serde_json::to_string(&config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    state.repo.set_setting(TIME_ROUNDING_SETTING_KEY, &json_str).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    tracing::info!("Time rounding config updated: {:?}", config);
+
+    Ok(Json(ApiResponse::success(config)))
+}

@@ -93,6 +93,9 @@ pub fn create_router(state: SharedState) -> Router {
         // Room Items Config
         .route("/api/settings/room-items", get(handlers::get_room_items))
         .route("/api/settings/room-items", put(handlers::set_room_items))
+        // Time Rounding Config
+        .route("/api/settings/time-rounding", get(handlers::get_time_rounding))
+        .route("/api/settings/time-rounding", put(handlers::set_time_rounding))
         // Location Pings (GPS tracking)
         .route("/api/location-pings", post(handlers::sync_location_pings))
         .route("/api/location-pings", get(handlers::get_location_pings))
