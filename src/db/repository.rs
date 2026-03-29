@@ -1568,4 +1568,265 @@ impl Repository {
         // Allow up to 60 heartbeats per hour
         Ok(heartbeat_count.0 > 60)
     }
+
+    // ==================== TIME ENTRIES ====================
+
+    /// Upsert a time entry
+    pub async fn upsert_time_entry(&self, input: &TimeEntryInput) -> anyhow::Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let clock_in = chrono::DateTime::from_timestamp_millis(input.clock_in)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| now.clone());
+        let clock_out = input.clock_out.and_then(|ts| {
+            chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339())
+        });
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO time_entries (uuid, device_id, customer_name, job_name, job_id, 
+                                      clock_in, clock_out, note, is_break, is_paid, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(uuid) DO UPDATE SET
+                clock_out = excluded.clock_out,
+                note = excluded.note,
+                synced_at = excluded.synced_at
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.device_id)
+        .bind(&input.customer_name)
+        .bind(&input.job_name)
+        .bind(&input.job_id)
+        .bind(&clock_in)
+        .bind(&clock_out)
+        .bind(&input.note)
+        .bind(input.is_break.unwrap_or(false) as i32)
+        .bind(input.is_paid.unwrap_or(true) as i32)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get all time entries with optional filtering
+    pub async fn get_time_entries(
+        &self,
+        device_id: Option<&str>,
+        job_id: Option<&str>,
+        since: Option<i64>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<TimeEntryRecord>> {
+        let mut query = String::from("SELECT * FROM time_entries WHERE 1=1");
+        if device_id.is_some() {
+            query.push_str(" AND device_id = ?");
+        }
+        if job_id.is_some() {
+            query.push_str(" AND job_id = ?");
+        }
+        if since.is_some() {
+            query.push_str(" AND clock_in > ?");
+        }
+        query.push_str(" ORDER BY clock_in DESC LIMIT ?");
+
+        let mut q = sqlx::query_as::<_, TimeEntryRecord>(&query);
+        if let Some(did) = device_id {
+            q = q.bind(did);
+        }
+        if let Some(jid) = job_id {
+            q = q.bind(jid);
+        }
+        if let Some(since_ts) = since {
+            let since_dt = chrono::DateTime::from_timestamp_millis(since_ts)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            q = q.bind(since_dt);
+        }
+        q = q.bind(limit);
+
+        Ok(q.fetch_all(&self.pool).await?)
+    }
+
+    /// Get time entry count
+    pub async fn get_time_entry_count(&self) -> anyhow::Result<i64> {
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM time_entries")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(result.0)
+    }
+
+    /// Get active time entries (currently clocked in)
+    pub async fn get_active_time_entries(&self) -> anyhow::Result<Vec<TimeEntryRecord>> {
+        let entries = sqlx::query_as::<_, TimeEntryRecord>(
+            "SELECT * FROM time_entries WHERE clock_out IS NULL AND is_break = 0 ORDER BY clock_in DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
+    /// Get active breaks
+    pub async fn get_active_breaks(&self) -> anyhow::Result<Vec<TimeEntryRecord>> {
+        let entries = sqlx::query_as::<_, TimeEntryRecord>(
+            "SELECT * FROM time_entries WHERE clock_out IS NULL AND is_break = 1 ORDER BY clock_in DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
+    // ==================== REPORTS ====================
+
+    /// Upsert a report
+    pub async fn upsert_report(&self, input: &ReportInput) -> anyhow::Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let created_at = input.created_at
+            .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339()))
+            .unwrap_or_else(|| now.clone());
+        let updated_at = input.updated_at
+            .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339()))
+            .unwrap_or_else(|| now.clone());
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO reports (uuid, job_id, title, room_name, notes, status, 
+                                 author_device_id, author_name, assigned_to_device_id, assigned_to_name,
+                                 cabinet_count, is_complete, has_fillers, has_handles, has_fast_caps,
+                                 has_set_boxes, has_caulking, punch_list, synced_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(uuid) DO UPDATE SET
+                title = excluded.title,
+                room_name = excluded.room_name,
+                notes = excluded.notes,
+                status = excluded.status,
+                assigned_to_device_id = excluded.assigned_to_device_id,
+                assigned_to_name = excluded.assigned_to_name,
+                cabinet_count = excluded.cabinet_count,
+                is_complete = excluded.is_complete,
+                has_fillers = excluded.has_fillers,
+                has_handles = excluded.has_handles,
+                has_fast_caps = excluded.has_fast_caps,
+                has_set_boxes = excluded.has_set_boxes,
+                has_caulking = excluded.has_caulking,
+                punch_list = excluded.punch_list,
+                synced_at = excluded.synced_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.job_id)
+        .bind(&input.title)
+        .bind(&input.room_name)
+        .bind(&input.notes)
+        .bind(input.status.as_deref().unwrap_or("draft"))
+        .bind(&input.author_device_id)
+        .bind(&input.author_name)
+        .bind(&input.assigned_to_device_id)
+        .bind(&input.assigned_to_name)
+        .bind(input.cabinet_count.unwrap_or(0))
+        .bind(input.is_complete.unwrap_or(false) as i32)
+        .bind(input.has_fillers.unwrap_or(false) as i32)
+        .bind(input.has_handles.unwrap_or(false) as i32)
+        .bind(input.has_fast_caps.unwrap_or(false) as i32)
+        .bind(input.has_set_boxes.unwrap_or(false) as i32)
+        .bind(input.has_caulking.unwrap_or(false) as i32)
+        .bind(&input.punch_list)
+        .bind(&now)
+        .bind(&created_at)
+        .bind(&updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get all reports with optional filtering
+    pub async fn get_reports(
+        &self,
+        job_id: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<ReportRecord>> {
+        let mut query = String::from("SELECT * FROM reports WHERE 1=1");
+        if job_id.is_some() {
+            query.push_str(" AND job_id = ?");
+        }
+        if status.is_some() {
+            query.push_str(" AND status = ?");
+        }
+        query.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+        let mut q = sqlx::query_as::<_, ReportRecord>(&query);
+        if let Some(jid) = job_id {
+            q = q.bind(jid);
+        }
+        if let Some(s) = status {
+            q = q.bind(s);
+        }
+        q = q.bind(limit);
+
+        Ok(q.fetch_all(&self.pool).await?)
+    }
+
+    /// Get report count
+    pub async fn get_report_count(&self) -> anyhow::Result<i64> {
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM reports")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(result.0)
+    }
+
+    /// Save a report photo (metadata only, file_data stored separately)
+    pub async fn upsert_report_photo(
+        &self,
+        uuid: &str,
+        report_id: &str,
+        caption: Option<&str>,
+        file_name: &str,
+        file_data: Option<&[u8]>,
+    ) -> anyhow::Result<i64> {
+        let now = Utc::now().to_rfc3339();
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO report_photos (uuid, report_id, caption, file_name, file_data, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(uuid) DO UPDATE SET
+                caption = excluded.caption,
+                synced_at = excluded.synced_at
+            "#,
+        )
+        .bind(uuid)
+        .bind(report_id)
+        .bind(caption)
+        .bind(file_name)
+        .bind(file_data)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get photos for a report
+    pub async fn get_report_photos(&self, report_id: &str) -> anyhow::Result<Vec<ReportPhotoRecord>> {
+        let photos = sqlx::query_as::<_, ReportPhotoRecord>(
+            "SELECT id, uuid, report_id, caption, file_name, synced_at, created_at FROM report_photos WHERE report_id = ? ORDER BY created_at ASC"
+        )
+        .bind(report_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(photos)
+    }
+
+    /// Get photo file data by UUID
+    pub async fn get_report_photo_data(&self, photo_uuid: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let result: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT file_data FROM report_photos WHERE uuid = ? AND file_data IS NOT NULL"
+        )
+        .bind(photo_uuid)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result.map(|(data,)| data))
+    }
 }

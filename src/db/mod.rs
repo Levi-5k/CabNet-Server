@@ -348,6 +348,103 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .await;
     */
 
+    // Time entries table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS time_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            device_id TEXT NOT NULL,
+            customer_name TEXT,
+            job_name TEXT,
+            job_id TEXT,
+            clock_in TEXT NOT NULL,
+            clock_out TEXT,
+            note TEXT,
+            is_break INTEGER DEFAULT 0,
+            is_paid INTEGER DEFAULT 1,
+            synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_time_entries_device ON time_entries(device_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_time_entries_clock_in ON time_entries(clock_in)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_time_entries_job_id ON time_entries(job_id)")
+        .execute(pool)
+        .await?;
+
+    // Reports table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            job_id TEXT,
+            title TEXT NOT NULL,
+            room_name TEXT,
+            notes TEXT,
+            status TEXT DEFAULT 'draft',
+            author_device_id TEXT,
+            author_name TEXT,
+            assigned_to_device_id TEXT,
+            assigned_to_name TEXT,
+            cabinet_count INTEGER DEFAULT 0,
+            is_complete INTEGER DEFAULT 0,
+            has_fillers INTEGER DEFAULT 0,
+            has_handles INTEGER DEFAULT 0,
+            has_fast_caps INTEGER DEFAULT 0,
+            has_set_boxes INTEGER DEFAULT 0,
+            has_caulking INTEGER DEFAULT 0,
+            punch_list TEXT,
+            synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_reports_job_id ON reports(job_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)")
+        .execute(pool)
+        .await?;
+
+    // Report photos table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS report_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            report_id TEXT NOT NULL,
+            caption TEXT,
+            file_name TEXT NOT NULL,
+            file_data BLOB,
+            synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_report_photos_report_id ON report_photos(report_id)")
+        .execute(pool)
+        .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }

@@ -79,6 +79,13 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/security/settings", put(handlers::update_security_settings))
         .route("/api/security/generate-code", post(handlers::generate_registration_code))
         .route("/api/security/codes", get(handlers::get_registration_codes))
+        // Time entries
+        .route("/api/time-entries", get(handlers::get_time_entries))
+        .route("/api/time-entries", post(handlers::sync_time_entries))
+        // Reports
+        .route("/api/reports", get(handlers::get_reports))
+        .route("/api/reports", post(handlers::sync_reports))
+        .route("/api/reports/:report_id/photos", post(handlers::upload_report_photo))
         .with_state(state)
         .layer(RequestDecompressionLayer::new()) // Decompress gzip requests from Android
         .layer(CompressionLayer::new()) // Compress responses with gzip/deflate

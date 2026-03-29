@@ -281,3 +281,104 @@ pub struct PendingChangeInput {
     pub entity_id: Option<String>,
     pub change_data: serde_json::Value,
 }
+
+// ==================== TIME ENTRIES ====================
+
+/// Time entry record from mobile time clock
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TimeEntryRecord {
+    pub id: i64,
+    pub uuid: String,
+    pub device_id: String,
+    pub customer_name: Option<String>,
+    pub job_name: Option<String>,
+    pub job_id: Option<String>,
+    pub clock_in: String,
+    pub clock_out: Option<String>,
+    pub note: Option<String>,
+    pub is_break: i32,
+    pub is_paid: i32,
+    pub synced_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Time entry data received from device API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntryInput {
+    pub id: String,
+    pub device_id: String,
+    pub customer_name: Option<String>,
+    pub job_name: Option<String>,
+    pub job_id: Option<String>,
+    pub clock_in: i64,
+    pub clock_out: Option<i64>,
+    pub note: Option<String>,
+    pub is_break: Option<bool>,
+    pub is_paid: Option<bool>,
+}
+
+// ==================== REPORTS ====================
+
+/// Report record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ReportRecord {
+    pub id: i64,
+    pub uuid: String,
+    pub job_id: Option<String>,
+    pub title: String,
+    pub room_name: Option<String>,
+    pub notes: Option<String>,
+    pub status: String,
+    pub author_device_id: Option<String>,
+    pub author_name: Option<String>,
+    pub assigned_to_device_id: Option<String>,
+    pub assigned_to_name: Option<String>,
+    pub cabinet_count: i32,
+    pub is_complete: i32,
+    pub has_fillers: i32,
+    pub has_handles: i32,
+    pub has_fast_caps: i32,
+    pub has_set_boxes: i32,
+    pub has_caulking: i32,
+    pub punch_list: Option<String>,
+    pub synced_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Report data received from device API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInput {
+    pub id: String,
+    pub job_id: Option<String>,
+    pub title: String,
+    pub room_name: Option<String>,
+    pub notes: Option<String>,
+    pub status: Option<String>,
+    pub author_device_id: Option<String>,
+    pub author_name: Option<String>,
+    pub assigned_to_device_id: Option<String>,
+    pub assigned_to_name: Option<String>,
+    pub cabinet_count: Option<i32>,
+    pub is_complete: Option<bool>,
+    pub has_fillers: Option<bool>,
+    pub has_handles: Option<bool>,
+    pub has_fast_caps: Option<bool>,
+    pub has_set_boxes: Option<bool>,
+    pub has_caulking: Option<bool>,
+    pub punch_list: Option<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+}
+
+/// Report photo record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ReportPhotoRecord {
+    pub id: i64,
+    pub uuid: String,
+    pub report_id: String,
+    pub caption: Option<String>,
+    pub file_name: String,
+    pub synced_at: Option<String>,
+    pub created_at: Option<String>,
+}

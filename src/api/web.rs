@@ -558,6 +558,10 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
     let pending_count = state.repo.get_pending_change_count().await.unwrap_or(0);
     let recent_scans = state.repo.get_scans(None, None, None, 5).await.unwrap_or_default();
     let jobs_with_counts = state.repo.get_jobs_with_counts().await.unwrap_or_default();
+    let time_entry_count = state.repo.get_time_entry_count().await.unwrap_or(0);
+    let active_workers = state.repo.get_active_time_entries().await.unwrap_or_default();
+    let report_count = state.repo.get_report_count().await.unwrap_or(0);
+    let active_worker_count = active_workers.len();
     
     let scans_per_device = if device_count > 0 { scan_count / device_count } else { 0 };
     let uptime = format_uptime(uptime_secs);
@@ -1981,6 +1985,14 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     <span>⚡</span>
                     <span>Live</span>
                 </div>
+                <div class="nav-item" data-page="timeclock">
+                    <span>⏱️</span>
+                    <span>Time Clock</span>
+                </div>
+                <div class="nav-item" data-page="reports">
+                    <span>📋</span>
+                    <span>Reports</span>
+                </div>
                 <div class="nav-item" data-page="approvals" id="nav-approvals" style="display: none;">
                     <span>✅</span>
                     <span>Approvals <span id="nav-approvals-badge" style="background: var(--accent); color: white; border-radius: 9999px; padding: 0.1rem 0.4rem; font-size: 0.65rem; margin-left: 0.25rem; display: none;">0</span></span>
@@ -2032,6 +2044,16 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                         <div class="stat-icon">📈</div>
                         <div class="stat-value" id="stat-ratio">{scans_per_device}</div>
                         <div class="stat-label">Scans/Device</div>
+                    </div>
+                    <div class="stat-card" onclick="showPage('timeclock')" style="cursor:pointer;">
+                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-value" id="stat-workers">{active_worker_count}</div>
+                        <div class="stat-label">Working Now</div>
+                    </div>
+                    <div class="stat-card" onclick="showPage('reports')" style="cursor:pointer;">
+                        <div class="stat-icon">📋</div>
+                        <div class="stat-value" id="stat-reports">{report_count}</div>
+                        <div class="stat-label">Reports</div>
                     </div>
                 </div>
                 
@@ -2236,6 +2258,61 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                 </div>
             </div>
             
+            <!-- Time Clock Page -->
+            <div class="page" id="page-timeclock">
+                <div class="page-header">
+                    <h2>Time Clock</h2>
+                    <div style="display: flex; gap: 0.75rem; align-items: center;">
+                        <select id="tc-filter" onchange="loadTimeEntries()" style="background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+                            <option value="all">All Workers</option>
+                        </select>
+                        <button class="btn btn-outline" onclick="loadTimeEntries()">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <!-- Active Workers -->
+                <div id="active-workers" style="margin-bottom: 1.5rem;">
+                    <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-muted);">Currently Working</h3>
+                    <div id="active-workers-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;"></div>
+                </div>
+
+                <!-- Timesheet Table -->
+                <div class="card" style="overflow-x: auto;">
+                    <table id="timeclock-table" style="width: 100%;">
+                        <thead>
+                            <tr>
+                                <th>Worker</th>
+                                <th>Job</th>
+                                <th>Clock In</th>
+                                <th>Clock Out</th>
+                                <th>Duration</th>
+                                <th>Type</th>
+                            </tr>
+                        </thead>
+                        <tbody id="timeclock-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Reports Page -->
+            <div class="page" id="page-reports">
+                <div class="page-header">
+                    <h2>Daily Reports</h2>
+                    <div style="display: flex; gap: 0.75rem; align-items: center;">
+                        <select id="report-sort" onchange="loadReports()" style="background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+                            <option value="recent">Most Recent</option>
+                            <option value="job">By Job</option>
+                        </select>
+                        <select id="report-filter-job" onchange="loadReports()" style="background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+                            <option value="all">All Jobs</option>
+                        </select>
+                        <button class="btn btn-outline" onclick="loadReports()">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div id="reports-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 1rem;"></div>
+            </div>
+
             <!-- Approvals Page -->
             <div class="page" id="page-approvals">
                 <div class="page-header">
@@ -2466,6 +2543,12 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         </div>
         <div class="mobile-more-item" data-page="live" onclick="mobileNav('live')">
             <span>⚡</span><span>Live</span>
+        </div>
+        <div class="mobile-more-item" data-page="timeclock" onclick="mobileNav('timeclock')">
+            <span>⏱️</span><span>Time Clock</span>
+        </div>
+        <div class="mobile-more-item" data-page="reports" onclick="mobileNav('reports')">
+            <span>📋</span><span>Reports</span>
         </div>
         <div class="mobile-more-item" data-page="approvals" id="mobile-more-approvals" style="display:none;" onclick="mobileNav('approvals')">
             <span>✅</span><span>Approvals</span>
@@ -3035,6 +3118,8 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             if (pageId === 'devices') loadDevices();
             if (pageId === 'scans') loadScans();
             if (pageId === 'approvals') loadApprovals();
+            if (pageId === 'timeclock') loadTimeEntries();
+            if (pageId === 'reports') loadReports();
         }}
         
         document.querySelectorAll('.nav-item').forEach(item => {{
@@ -4352,7 +4437,200 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         setInterval(() => {{
             loadJobs();
             loadDevices();
+            loadTimeEntries();
         }}, 60000);
+
+        // ==================== TIME CLOCK ====================
+
+        async function loadTimeEntries() {{
+            try {{
+                const response = await fetch('/api/time-entries?limit=500');
+                const data = await response.json();
+                if (!data.success) return;
+                
+                const entries = data.entries || [];
+                const filter = document.getElementById('tc-filter').value;
+                
+                // Populate device filter dropdown
+                const devices = [...new Set(entries.map(e => e.device_id))];
+                const filterEl = document.getElementById('tc-filter');
+                const currentVal = filterEl.value;
+                filterEl.innerHTML = '<option value="all">All Workers</option>' + 
+                    devices.map(d => `<option value="${{d}}" ${{d === currentVal ? 'selected' : ''}}>${{d}}</option>`).join('');
+                
+                const filtered = filter === 'all' ? entries : entries.filter(e => e.device_id === filter);
+                
+                // Active workers (clocked in, not on break)
+                const activeWorkers = filtered.filter(e => !e.clock_out && e.is_break === 0);
+                const activeBreaks = filtered.filter(e => !e.clock_out && e.is_break === 1);
+                
+                const activeHtml = activeWorkers.length === 0 && activeBreaks.length === 0
+                    ? '<div style="color: var(--text-muted); font-style: italic; padding: 1rem;">No one is currently clocked in</div>'
+                    : [...activeWorkers.map(e => {{
+                        const elapsed = formatElapsed(e.clock_in);
+                        return `<div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; border-left: 4px solid var(--green);">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div>
+                                    <div style="font-weight: 600;">${{e.device_id}}</div>
+                                    <div style="color: var(--text-muted); font-size: 0.85rem;">${{e.job_name || e.customer_name || 'No job'}}</div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="color: var(--green); font-weight: 600;">🟢 Working</div>
+                                    <div style="font-size: 0.85rem; color: var(--text-muted);">${{elapsed}}</div>
+                                </div>
+                            </div>
+                        </div>`;
+                    }}), ...activeBreaks.map(e => {{
+                        const elapsed = formatElapsed(e.clock_in);
+                        return `<div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; border-left: 4px solid var(--orange);">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div>
+                                    <div style="font-weight: 600;">${{e.device_id}}</div>
+                                    <div style="color: var(--text-muted); font-size: 0.85rem;">${{e.job_name || e.customer_name || 'No job'}}</div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="color: var(--orange); font-weight: 600;">☕ Break</div>
+                                    <div style="font-size: 0.85rem; color: var(--text-muted);">${{elapsed}}</div>
+                                </div>
+                            </div>
+                        </div>`;
+                    }})].join('');
+                
+                document.getElementById('active-workers-list').innerHTML = activeHtml;
+                
+                // Timesheet table (completed entries)
+                const completed = filtered.filter(e => e.clock_out);
+                const tbody = document.getElementById('timeclock-tbody');
+                tbody.innerHTML = completed.length === 0
+                    ? '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No completed time entries</td></tr>'
+                    : completed.map(e => {{
+                        const dur = formatDuration(e.clock_in, e.clock_out);
+                        const typeLabel = e.is_break ? `<span style="color: var(--orange);">☕ Break</span>` : `<span style="color: var(--green);">🟢 Work</span>`;
+                        const paidLabel = e.is_paid ? '' : ' <span style="background: var(--border); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem;">UNPAID</span>';
+                        return `<tr>
+                            <td>${{e.device_id}}</td>
+                            <td>${{e.job_name || e.customer_name || '-'}}</td>
+                            <td>${{formatDateTime(e.clock_in)}}</td>
+                            <td>${{formatDateTime(e.clock_out)}}</td>
+                            <td>${{dur}}</td>
+                            <td>${{typeLabel}}${{paidLabel}}</td>
+                        </tr>`;
+                    }}).join('');
+            }} catch (e) {{
+                console.error('Failed to load time entries:', e);
+            }}
+        }}
+
+        function formatElapsed(isoDate) {{
+            const start = new Date(isoDate);
+            const now = new Date();
+            const diff = Math.floor((now - start) / 1000);
+            const h = Math.floor(diff / 3600);
+            const m = Math.floor((diff % 3600) / 60);
+            return h > 0 ? `${{h}}h ${{m}}m` : `${{m}}m`;
+        }}
+
+        function formatDuration(startIso, endIso) {{
+            const start = new Date(startIso);
+            const end = new Date(endIso);
+            const diff = Math.floor((end - start) / 1000);
+            const h = Math.floor(diff / 3600);
+            const m = Math.floor((diff % 3600) / 60);
+            return h > 0 ? `${{h}}h ${{m}}m` : `${{m}}m`;
+        }}
+
+        function formatDateTime(isoDate) {{
+            if (!isoDate) return '-';
+            const d = new Date(isoDate);
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {{hour: '2-digit', minute: '2-digit'}});
+        }}
+
+        // ==================== REPORTS ====================
+
+        async function loadReports() {{
+            try {{
+                const sortBy = document.getElementById('report-sort').value;
+                const jobFilter = document.getElementById('report-filter-job').value;
+                
+                let url = '/api/reports?limit=500';
+                if (jobFilter !== 'all') url += `&job_id=${{jobFilter}}`;
+                
+                const response = await fetch(url);
+                const data = await response.json();
+                if (!data.success) return;
+                
+                let reports = data.reports || [];
+                
+                // Populate job filter dropdown  
+                const jobIds = [...new Set(reports.map(r => r.job_id).filter(Boolean))];
+                const jobFilterEl = document.getElementById('report-filter-job');
+                const currentJob = jobFilterEl.value;
+                // Only rebuild if needed
+                if (jobFilterEl.options.length <= 1) {{
+                    // Fetch job names for display
+                    try {{
+                        const jobsResp = await fetch('/api/jobs');
+                        const jobsData = await jobsResp.json();
+                        const jobs = jobsData.jobs || [];
+                        jobFilterEl.innerHTML = '<option value="all">All Jobs</option>' +
+                            jobs.map(j => `<option value="${{j.uuid}}" ${{j.uuid === currentJob ? 'selected' : ''}}>${{j.name}}</option>`).join('');
+                    }} catch (e) {{}}
+                }}
+                
+                // Sort
+                if (sortBy === 'job') {{
+                    reports.sort((a, b) => (a.job_id || '').localeCompare(b.job_id || '') || new Date(b.created_at) - new Date(a.created_at));
+                }} else {{
+                    reports.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                }}
+                
+                const container = document.getElementById('reports-container');
+                if (reports.length === 0) {{
+                    container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem; grid-column: 1 / -1;"><div style="font-size: 2rem; margin-bottom: 1rem;">\ud83d\udccb</div>No reports synced yet</div>';
+                    return;
+                }}
+                
+                container.innerHTML = reports.map(r => {{
+                    const statusColor = r.is_complete ? 'var(--green)' : r.status === 'in_progress' ? 'var(--orange)' : 'var(--text-muted)';
+                    const statusLabel = r.is_complete ? '\u2705 Complete' : r.status === 'in_progress' ? '\ud83d\udfe1 In Progress' : '\ud83d\udccb Draft';
+                    const date = new Date(r.created_at).toLocaleDateString();
+                    
+                    // Checklist items
+                    const checks = [
+                        r.has_fillers ? '\u2705 Fillers' : '\u2b1c Fillers',
+                        r.has_handles ? '\u2705 Handles' : '\u2b1c Handles',
+                        r.has_fast_caps ? '\u2705 Fast Caps' : '\u2b1c Fast Caps',
+                        r.has_set_boxes ? '\u2705 Set Boxes' : '\u2b1c Set Boxes',
+                        r.has_caulking ? '\u2705 Caulking' : '\u2b1c Caulking',
+                    ].join(' &middot; ');
+                    
+                    return `<div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; cursor: pointer;" onclick="showReportDetail(this)" data-report-id="${{r.uuid}}">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.75rem;">
+                            <div>
+                                <div style="font-weight: 600; font-size: 1.05rem;">${{r.title}}</div>
+                                <div style="color: var(--text-muted); font-size: 0.85rem;">${{r.room_name || 'No room'}} &middot; ${{date}}</div>
+                            </div>
+                            <div style="color: ${{statusColor}}; font-size: 0.85rem; font-weight: 500;">${{statusLabel}}</div>
+                        </div>
+                        <div style="display: flex; gap: 1rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text-muted);">
+                            <span>\ud83d\udccc ${{r.author_name || 'Unknown'}}</span>
+                            <span>\ud83d\uddc4\ufe0f ${{r.cabinet_count || 0}} cabinets</span>
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">${{checks}}</div>
+                        ${{r.notes ? `<div style="margin-top: 0.5rem; padding: 0.5rem; background: var(--bg); border-radius: 8px; font-size: 0.85rem; color: var(--text-muted);">${{r.notes.substring(0, 200)}}${{r.notes.length > 200 ? '...' : ''}}</div>` : ''}}
+                        ${{r.punch_list ? `<div style="margin-top: 0.5rem; padding: 0.5rem; background: rgba(251,146,60,0.1); border: 1px solid rgba(251,146,60,0.3); border-radius: 8px; font-size: 0.85rem;"><strong style="color: var(--orange);">Punch List:</strong> <span style="color: var(--text-muted);">${{r.punch_list.substring(0, 200)}}${{r.punch_list.length > 200 ? '...' : ''}}</span></div>` : ''}}
+                    </div>`;
+                }}).join('');
+            }} catch (e) {{
+                console.error('Failed to load reports:', e);
+            }}
+        }}
+
+        function showReportDetail(el) {{
+            // Future: expand or open a detail modal
+            el.style.borderColor = 'var(--accent)';
+            setTimeout(() => el.style.borderColor = 'var(--border)', 1500);
+        }}
     </script>
 </body>
 </html>

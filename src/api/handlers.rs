@@ -1695,3 +1695,221 @@ pub async fn get_registration_codes(
 
     Ok(Json(ApiResponse::success(codes)))
 }
+
+// ==================== TIME ENTRIES ====================
+
+#[derive(Deserialize)]
+pub struct SyncTimeEntriesRequest {
+    pub device_id: String,
+    pub entries: Vec<TimeEntryInput>,
+}
+
+#[derive(Serialize)]
+pub struct SyncTimeEntriesResponse {
+    pub synced_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GetTimeEntriesQuery {
+    pub device_id: Option<String>,
+    pub job_id: Option<String>,
+    pub since: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct GetTimeEntriesResponse {
+    pub entries: Vec<TimeEntryRecord>,
+    pub total: i64,
+}
+
+/// POST /api/time-entries - Sync time entries from device
+pub async fn sync_time_entries(
+    State(state): State<SharedState>,
+    Json(request): Json<SyncTimeEntriesRequest>,
+) -> Result<Json<ApiResponse<SyncTimeEntriesResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let mut synced_ids = Vec::new();
+
+    for entry in &request.entries {
+        match state.repo.upsert_time_entry(entry).await {
+            Ok(_) => synced_ids.push(entry.id.clone()),
+            Err(e) => tracing::warn!("Failed to sync time entry {}: {}", entry.id, e),
+        }
+    }
+
+    let count = synced_ids.len();
+    Ok(Json(ApiResponse::success_with_message(
+        SyncTimeEntriesResponse { synced_ids },
+        format!("Synced {} time entries", count),
+    )))
+}
+
+/// GET /api/time-entries - Get time entries with optional filtering
+pub async fn get_time_entries(
+    State(state): State<SharedState>,
+    Query(params): Query<GetTimeEntriesQuery>,
+) -> Result<Json<ApiResponse<GetTimeEntriesResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let limit = params.limit.unwrap_or(500);
+
+    let entries = state.repo.get_time_entries(
+        params.device_id.as_deref(),
+        params.job_id.as_deref(),
+        params.since,
+        limit,
+    ).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    let total = state.repo.get_time_entry_count().await.unwrap_or(0);
+
+    Ok(Json(ApiResponse::success(GetTimeEntriesResponse { entries, total })))
+}
+
+// ==================== REPORTS ====================
+
+#[derive(Deserialize)]
+pub struct SyncReportsRequest {
+    pub device_id: String,
+    pub reports: Vec<ReportInput>,
+}
+
+#[derive(Serialize)]
+pub struct SyncReportsResponse {
+    pub synced_report_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GetReportsQuery {
+    pub job_id: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct GetReportsResponse {
+    pub reports: Vec<ReportRecord>,
+    pub total: i64,
+}
+
+/// POST /api/reports - Sync reports from device
+pub async fn sync_reports(
+    State(state): State<SharedState>,
+    Json(request): Json<SyncReportsRequest>,
+) -> Result<Json<ApiResponse<SyncReportsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let mut synced_ids = Vec::new();
+
+    for report in &request.reports {
+        match state.repo.upsert_report(report).await {
+            Ok(_) => synced_ids.push(report.id.clone()),
+            Err(e) => tracing::warn!("Failed to sync report {}: {}", report.id, e),
+        }
+    }
+
+    let count = synced_ids.len();
+    Ok(Json(ApiResponse::success_with_message(
+        SyncReportsResponse { synced_report_ids: synced_ids },
+        format!("Synced {} reports", count),
+    )))
+}
+
+/// GET /api/reports - Get reports with optional filtering
+pub async fn get_reports(
+    State(state): State<SharedState>,
+    Query(params): Query<GetReportsQuery>,
+) -> Result<Json<ApiResponse<GetReportsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let limit = params.limit.unwrap_or(500);
+
+    let reports = state.repo.get_reports(
+        params.job_id.as_deref(),
+        params.status.as_deref(),
+        limit,
+    ).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    let total = state.repo.get_report_count().await.unwrap_or(0);
+
+    Ok(Json(ApiResponse::success(GetReportsResponse { reports, total })))
+}
+
+/// POST /api/reports/:report_id/photos - Upload a report photo (multipart)
+pub async fn upload_report_photo(
+    State(state): State<SharedState>,
+    Path(report_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<ApiResponse<SyncReportsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    // Parse multipart boundary from content type
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("multipart/form-data") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Expected multipart/form-data"))));
+    }
+
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .unwrap_or("")
+        .trim();
+
+    if boundary.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing multipart boundary"))));
+    }
+
+    // Simple multipart parse - find the file data between boundaries
+    let body_bytes = body.to_vec();
+    let boundary_marker = format!("--{}", boundary);
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Find filename from Content-Disposition header
+    let file_name = body_str
+        .lines()
+        .find(|l| l.contains("filename="))
+        .and_then(|l| {
+            l.split("filename=\"").nth(1).and_then(|s| s.split('"').next())
+        })
+        .unwrap_or("photo.jpg")
+        .to_string();
+
+    // Find the file data: after the double CRLF following the part headers, before the closing boundary
+    let parts: Vec<&str> = body_str.split(&boundary_marker).collect();
+    let mut photo_data: Option<Vec<u8>> = None;
+
+    for part in &parts {
+        if part.contains("Content-Type: image/") || part.contains("name=\"photo\"") {
+            // Find the blank line that separates headers from body
+            if let Some(header_end) = part.find("\r\n\r\n") {
+                let data_start = header_end + 4;
+                // Find this position in original bytes
+                let part_start = body_str.find(part).unwrap_or(0);
+                let abs_start = part_start + data_start;
+                // Data ends before the closing \r\n
+                let data_end = body_bytes.len().saturating_sub(boundary_marker.len() + 6);
+                if abs_start < data_end && abs_start < body_bytes.len() {
+                    photo_data = Some(body_bytes[abs_start..data_end].to_vec());
+                }
+            }
+        }
+    }
+
+    let uuid = uuid::Uuid::new_v4().to_string();
+    state.repo.upsert_report_photo(
+        &uuid,
+        &report_id,
+        None,
+        &file_name,
+        photo_data.as_deref(),
+    ).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        SyncReportsResponse { synced_report_ids: vec![uuid] },
+        "Photo uploaded".to_string(),
+    )))
+}
