@@ -1,4 +1,4 @@
-# CodeBar Server
+# CabNet Server
 
 A Rust desktop application for managing barcode scans from Android devices.
 
@@ -52,7 +52,7 @@ EMAIL_FROM=your-email@gmail.com
 
 ## Android App Configuration
 
-In the CodeBar Android app settings, set the server URL to:
+In the CabNet Android app settings, set the server URL to:
 ```
 http://{your-pc-ip}:8080
 ```
