@@ -3,7 +3,7 @@ use crate::db::models::*;
 use crate::services::SharedTunnelManager;
 use eframe::egui;
 
-use super::tabs::{ApprovalsTab, DevicesTab, EmailTab, JobsTab, MapTab, ScansTab, SettingsTab};
+use super::tabs::{ApprovalsTab, DevicesTab, EmailTab, JobsTab, MapTab, ScansTab, SettingsTab, TeamTab, TimesheetsTab};
 
 /// Available tabs in the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +12,8 @@ pub enum Tab {
     Jobs,
     Scans,
     Devices,
+    Team,
+    Timesheets,
     Approvals,
     Email,
     Settings,
@@ -57,6 +59,8 @@ pub struct TabStates {
     pub approvals: ApprovalsTab,
     pub settings: SettingsTab,
     pub email: EmailTab,
+    pub team: TeamTab,
+    pub timesheets: TimesheetsTab,
 }
 
 impl Default for TabStates {
@@ -69,6 +73,8 @@ impl Default for TabStates {
             approvals: ApprovalsTab::default(),
             settings: SettingsTab::default(),
             email: EmailTab::default(),
+            team: TeamTab::default(),
+            timesheets: TimesheetsTab::default(),
         }
     }
 }
@@ -278,6 +284,10 @@ impl eframe::App for CodeBarApp {
                     ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Devices, "📱", "Devices");
                     ui.add_space(4.0);
+                    Self::tab_button(ui, &mut self.current_tab, Tab::Team, "👥", "Team");
+                    ui.add_space(4.0);
+                    Self::tab_button(ui, &mut self.current_tab, Tab::Timesheets, "📋", "Timesheets");
+                    ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Map, "🗺", "Map");
                     ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Email, "✉", "Email");
@@ -366,6 +376,16 @@ impl eframe::App for CodeBarApp {
                         }
                     }
                     Tab::Devices => self.tabs.devices.ui(ui, &self.cached_data, &self.server_addr, &self.tunnel_manager),
+                    Tab::Team => {
+                        if self.tabs.team.ui(ui, &self.state, &self.runtime) {
+                            self.needs_refresh = true;
+                        }
+                    }
+                    Tab::Timesheets => {
+                        if self.tabs.timesheets.ui(ui, &self.state, &self.runtime) {
+                            self.needs_refresh = true;
+                        }
+                    }
                     Tab::Approvals => {
                         if self.tabs.approvals.ui(ui, &self.state, &self.runtime) {
                             self.needs_refresh = true;

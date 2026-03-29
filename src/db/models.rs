@@ -437,3 +437,55 @@ pub struct ActiveWorkerPosition {
     pub clock_in: String,
     pub is_on_break: bool,
 }
+
+// ==================== TEAM MEMBERS ====================
+
+/// Team member record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TeamMember {
+    pub id: i64,
+    pub device_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub is_admin: i32,
+    pub avatar_color: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Team member input from API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamMemberInput {
+    pub device_id: String,
+    pub display_name: String,
+    pub role: Option<String>,
+    pub is_admin: Option<bool>,
+    pub avatar_color: Option<String>,
+}
+
+/// Team member with current status (joined from devices + time_entries)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamMemberStatus {
+    pub device_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub is_admin: bool,
+    pub avatar_color: Option<String>,
+    pub status: String,           // "working", "break", "offline"
+    pub current_job: Option<String>,
+    pub clock_in: Option<String>,
+    pub last_seen: Option<String>,
+    pub total_scans_today: i64,
+}
+
+/// Timesheet summary for a day
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimesheetDay {
+    pub date: String,
+    pub device_id: String,
+    pub display_name: String,
+    pub entries: Vec<TimeEntryRecord>,
+    pub total_work_seconds: i64,
+    pub total_break_seconds: i64,
+    pub has_gps: bool,
+}

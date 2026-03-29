@@ -1676,7 +1676,7 @@ pub async fn generate_registration_code(
     State(state): State<SharedState>,
     Json(request): Json<GenerateCodeRequest>,
 ) -> Result<Json<ApiResponse<RegistrationCodeResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     let code = state.repo.generate_registration_code(request.description.as_deref()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
@@ -2002,4 +2002,96 @@ pub async fn get_latest_positions(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
 
     Ok(Json(ApiResponse::success(LatestPositionsResponse { positions })))
+}
+
+// ==================== TEAM MEMBERS ====================
+
+#[derive(Serialize)]
+pub struct TeamStatusResponse {
+    pub members: Vec<TeamMemberStatus>,
+}
+
+#[derive(Serialize)]
+pub struct TeamMembersResponse {
+    pub members: Vec<crate::db::models::TeamMember>,
+}
+
+pub async fn get_team_status(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<TeamStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let members = state.repo.get_team_status().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(TeamStatusResponse { members })))
+}
+
+pub async fn get_team_members(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<TeamMembersResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let members = state.repo.get_team_members().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(TeamMembersResponse { members })))
+}
+
+pub async fn upsert_team_member(
+    State(state): State<SharedState>,
+    Json(input): Json<TeamMemberInput>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    state.repo.upsert_team_member(&input).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success_with_message(
+        serde_json::json!({"device_id": input.device_id}),
+        "Team member saved",
+    )))
+}
+
+pub async fn delete_team_member(
+    State(state): State<SharedState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let deleted = state.repo.delete_team_member(&device_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    if deleted {
+        Ok(Json(ApiResponse::success_with_message(serde_json::json!({}), "Team member removed")))
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Team member not found"))))
+    }
+}
+
+// ==================== TIMESHEETS ====================
+
+#[derive(Deserialize)]
+pub struct GetTimesheetsQuery {
+    pub device_id: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TimesheetsResponse {
+    pub days: Vec<TimesheetDay>,
+    pub total: usize,
+}
+
+pub async fn get_timesheets(
+    State(state): State<SharedState>,
+    Query(query): Query<GetTimesheetsQuery>,
+) -> Result<Json<ApiResponse<TimesheetsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let limit = query.limit.unwrap_or(1000);
+
+    let days = state.repo.get_timesheets(
+        query.device_id.as_deref(),
+        query.date_from.as_deref(),
+        query.date_to.as_deref(),
+        limit,
+    ).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    let total = days.len();
+    Ok(Json(ApiResponse::success(TimesheetsResponse { days, total })))
 }

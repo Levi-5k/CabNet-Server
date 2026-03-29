@@ -5,6 +5,8 @@ mod jobs;
 mod map;
 mod scans;
 pub mod settings;
+mod team;
+mod timesheets;
 
 pub use approvals::ApprovalsTab;
 pub use devices::DevicesTab;
@@ -13,3 +15,5 @@ pub use jobs::JobsTab;
 pub use map::MapTab;
 pub use scans::ScansTab;
 pub use settings::SettingsTab;
+pub use team::TeamTab;
+pub use timesheets::TimesheetsTab;

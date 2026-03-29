@@ -1974,4 +1974,223 @@ impl Repository {
             .await?;
         Ok(count)
     }
+
+    // ==================== TEAM MEMBERS ====================
+
+    /// Upsert a team member (auto-create from device_id if needed)
+    pub async fn upsert_team_member(&self, input: &TeamMemberInput) -> anyhow::Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let role = input.role.clone().unwrap_or_else(|| "worker".to_string());
+        let is_admin = input.is_admin.unwrap_or(false) as i32;
+
+        let result = sqlx::query(
+            r#"INSERT INTO team_members (device_id, display_name, role, is_admin, avatar_color, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                role = excluded.role,
+                is_admin = excluded.is_admin,
+                avatar_color = COALESCE(excluded.avatar_color, team_members.avatar_color),
+                updated_at = excluded.updated_at"#,
+        )
+        .bind(&input.device_id)
+        .bind(&input.display_name)
+        .bind(&role)
+        .bind(is_admin)
+        .bind(&input.avatar_color)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get all team members
+    pub async fn get_team_members(&self) -> anyhow::Result<Vec<TeamMember>> {
+        let members = sqlx::query_as::<_, TeamMember>("SELECT * FROM team_members ORDER BY display_name")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(members)
+    }
+
+    /// Delete a team member
+    pub async fn delete_team_member(&self, device_id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM team_members WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get team members with their current status (working/break/offline)
+    pub async fn get_team_status(&self) -> anyhow::Result<Vec<TeamMemberStatus>> {
+        // Get all registered team members
+        let members = self.get_team_members().await?;
+
+        // Get active time entries (currently clocked in)
+        let active_entries = self.get_active_time_entries().await?;
+
+        // Get today's date for scan counts
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        let mut statuses = Vec::new();
+        for member in &members {
+            // Find active time entry for this device
+            let active_work = active_entries.iter().find(|e| e.device_id == member.device_id && e.is_break == 0);
+            let active_break = active_entries.iter().find(|e| e.device_id == member.device_id && e.is_break == 1);
+
+            let (status, current_job, clock_in) = if let Some(entry) = active_break {
+                ("break".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
+            } else if let Some(entry) = active_work {
+                ("working".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
+            } else {
+                ("offline".to_string(), None, None)
+            };
+
+            // Get device last_seen
+            let last_seen: Option<String> = sqlx::query_scalar(
+                "SELECT last_seen_at FROM devices WHERE device_id = ?"
+            )
+            .bind(&member.device_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten();
+
+            // Get today's scan count for this device
+            let (scan_count,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM scans WHERE device_id = ? AND scanned_at >= ?"
+            )
+            .bind(&member.device_id)
+            .bind(&format!("{}T00:00:00", today))
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or((0,));
+
+            statuses.push(TeamMemberStatus {
+                device_id: member.device_id.clone(),
+                display_name: member.display_name.clone(),
+                role: member.role.clone(),
+                is_admin: member.is_admin != 0,
+                avatar_color: member.avatar_color.clone(),
+                status,
+                current_job,
+                clock_in,
+                last_seen,
+                total_scans_today: scan_count,
+            });
+        }
+
+        Ok(statuses)
+    }
+
+    // ==================== TIMESHEETS ====================
+
+    /// Get timesheet data grouped by day for a specific device (or all devices if None)
+    pub async fn get_timesheets(
+        &self,
+        device_id: Option<&str>,
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<TimesheetDay>> {
+        // Fetch time entries with filters
+        let entries = if let Some(did) = device_id {
+            sqlx::query_as::<_, TimeEntryRecord>(
+                "SELECT * FROM time_entries WHERE device_id = ? ORDER BY clock_in DESC LIMIT ?"
+            )
+            .bind(did)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, TimeEntryRecord>(
+                "SELECT * FROM time_entries ORDER BY clock_in DESC LIMIT ?"
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        // Get team member names lookup
+        let members = self.get_team_members().await?;
+        let name_map: std::collections::HashMap<String, String> = members
+            .into_iter()
+            .map(|m| (m.device_id, m.display_name))
+            .collect();
+
+        // Group by (device_id, date)
+        let mut day_map: std::collections::HashMap<(String, String), Vec<TimeEntryRecord>> =
+            std::collections::HashMap::new();
+
+        for entry in entries {
+            let date = entry.clock_in.split('T').next().unwrap_or(&entry.clock_in).to_string();
+
+            // Apply date filters
+            if let Some(from) = date_from {
+                if date < from.to_string() { continue; }
+            }
+            if let Some(to) = date_to {
+                if date > to.to_string() { continue; }
+            }
+
+            day_map
+                .entry((entry.device_id.clone(), date))
+                .or_default()
+                .push(entry);
+        }
+
+        // Build TimesheetDay structs
+        let mut result: Vec<TimesheetDay> = Vec::new();
+        for ((did, date), day_entries) in &day_map {
+            let display_name = name_map.get(did).cloned().unwrap_or_else(|| did.clone());
+
+            let mut total_work: i64 = 0;
+            let mut total_break: i64 = 0;
+
+            for entry in day_entries {
+                if let Some(ref clock_out) = entry.clock_out {
+                    let start = chrono::DateTime::parse_from_rfc3339(&entry.clock_in).ok();
+                    let end = chrono::DateTime::parse_from_rfc3339(clock_out).ok();
+                    if let (Some(s), Some(e)) = (start, end) {
+                        let secs = (e - s).num_seconds().max(0);
+                        if entry.is_break != 0 {
+                            total_break += secs;
+                        } else {
+                            total_work += secs;
+                        }
+                    }
+                }
+            }
+
+            // Check if any GPS pings exist for this day's entries
+            let entry_uuids: Vec<String> = day_entries.iter().map(|e| e.uuid.clone()).collect();
+            let has_gps = if !entry_uuids.is_empty() {
+                let placeholders: String = entry_uuids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let query_str = format!("SELECT COUNT(*) FROM location_pings WHERE time_entry_id IN ({})", placeholders);
+                let mut query = sqlx::query_scalar::<_, i64>(&query_str);
+                for uuid in &entry_uuids {
+                    query = query.bind(uuid);
+                }
+                let count: i64 = query.fetch_one(&self.pool).await.unwrap_or(0);
+                count > 0
+            } else {
+                false
+            };
+
+            result.push(TimesheetDay {
+                date: date.clone(),
+                device_id: did.clone(),
+                display_name,
+                entries: day_entries.clone(),
+                total_work_seconds: total_work,
+                total_break_seconds: total_break,
+                has_gps,
+            });
+        }
+
+        // Sort by date descending, then by name
+        result.sort_by(|a, b| b.date.cmp(&a.date).then(a.display_name.cmp(&b.display_name)));
+
+        Ok(result)
+    }
 }

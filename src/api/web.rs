@@ -1987,6 +1987,14 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     <span>📋</span>
                     <span>Reports</span>
                 </div>
+                <div class="nav-item" data-page="team">
+                    <span>👥</span>
+                    <span>Team</span>
+                </div>
+                <div class="nav-item" data-page="timesheets">
+                    <span>📋</span>
+                    <span>Timesheets</span>
+                </div>
                 <div class="nav-item" data-page="approvals" id="nav-approvals" style="display: none;">
                     <span>✅</span>
                     <span>Approvals <span id="nav-approvals-badge" style="background: var(--accent); color: white; border-radius: 9999px; padding: 0.1rem 0.4rem; font-size: 0.65rem; margin-left: 0.25rem; display: none;">0</span></span>
@@ -2326,6 +2334,58 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     </div>
                 </div>
             </div>
+
+            <!-- Team Page -->
+            <div class="page" id="page-team">
+                <div class="page-header">
+                    <h2>👥 Team</h2>
+                    <div style="display: flex; gap: 0.75rem; align-items: center;">
+                        <button class="btn btn-primary" onclick="showAddMemberModal()">➕ Add Member</button>
+                        <button class="btn btn-outline" onclick="loadTeamStatus()">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap;" id="team-stats"></div>
+
+                <div style="display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: center;">
+                    <input type="text" id="team-search" placeholder="Search team..." oninput="filterTeam()" style="background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 8px; width: 200px;">
+                    <select id="team-filter" onchange="filterTeam()" style="background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 0.5rem; border-radius: 8px;">
+                        <option value="all">All</option>
+                        <option value="working">🟢 Working</option>
+                        <option value="break">☕ Break</option>
+                        <option value="offline">⚫ Offline</option>
+                    </select>
+                </div>
+
+                <div id="team-container">
+                    <div style="text-align: center; padding: 2rem; color: var(--text-muted);"><div class="spinner"></div>Loading...</div>
+                </div>
+            </div>
+
+            <!-- Timesheets Page -->
+            <div class="page" id="page-timesheets">
+                <div class="page-header">
+                    <h2>📋 Timesheets</h2>
+                    <div style="display: flex; gap: 0.75rem; align-items: center;">
+                        <button class="btn btn-outline" onclick="loadTimesheets()">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap;" id="ts-stats"></div>
+
+                <div style="display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: center; flex-wrap: wrap;">
+                    <select id="ts-worker-filter" onchange="loadTimesheets()" style="background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 0.5rem; border-radius: 8px;">
+                        <option value="all">All Workers</option>
+                    </select>
+                    <input type="date" id="ts-date-from" onchange="loadTimesheets()" style="background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 0.5rem; border-radius: 8px;">
+                    <span style="color: var(--text-muted);">to</span>
+                    <input type="date" id="ts-date-to" onchange="loadTimesheets()" style="background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 0.5rem; border-radius: 8px;">
+                </div>
+
+                <div id="timesheets-container">
+                    <div style="text-align: center; padding: 2rem; color: var(--text-muted);"><div class="spinner"></div>Loading...</div>
+                </div>
+            </div>
         </main>
     </div>
     
@@ -2543,6 +2603,12 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         </div>
         <div class="mobile-more-item" data-page="reports" onclick="mobileNav('reports')">
             <span>📋</span><span>Reports</span>
+        </div>
+        <div class="mobile-more-item" data-page="team" onclick="mobileNav('team')">
+            <span>👥</span><span>Team</span>
+        </div>
+        <div class="mobile-more-item" data-page="timesheets" onclick="mobileNav('timesheets')">
+            <span>📋</span><span>Timesheets</span>
         </div>
         <div class="mobile-more-item" data-page="approvals" id="mobile-more-approvals" style="display:none;" onclick="mobileNav('approvals')">
             <span>✅</span><span>Approvals</span>
@@ -3114,6 +3180,8 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             if (pageId === 'approvals') loadApprovals();
             if (pageId === 'timeclock') loadTimeEntries();
             if (pageId === 'reports') loadReports();
+            if (pageId === 'team') loadTeamStatus();
+            if (pageId === 'timesheets') loadTimesheets();
         }}
         
         document.querySelectorAll('.nav-item').forEach(item => {{
@@ -4432,6 +4500,9 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             loadJobs();
             loadDevices();
             loadTimeEntries();
+            const activePage = document.querySelector('.page.active')?.id;
+            if (activePage === 'page-team') loadTeamStatus();
+            if (activePage === 'page-timesheets') loadTimesheets();
         }}, 60000);
 
         // ==================== TIME CLOCK ====================
@@ -4624,6 +4695,266 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             // Future: expand or open a detail modal
             el.style.borderColor = 'var(--accent)';
             setTimeout(() => el.style.borderColor = 'var(--border)', 1500);
+        }}
+
+        // ==================== TEAM ====================
+
+        let teamData = [];
+
+        async function loadTeamStatus() {{
+            try {{
+                const response = await fetch('/api/team/status');
+                const data = await response.json();
+                if (!data.success) return;
+                teamData = data.members || [];
+                renderTeam();
+            }} catch (e) {{
+                console.error('Failed to load team:', e);
+            }}
+        }}
+
+        function renderTeam() {{
+            const search = (document.getElementById('team-search')?.value || '').toLowerCase();
+            const filter = document.getElementById('team-filter')?.value || 'all';
+
+            const filtered = teamData.filter(m => {{
+                const matchSearch = !search || m.display_name.toLowerCase().includes(search) || m.device_id.toLowerCase().includes(search);
+                const matchFilter = filter === 'all' || m.status === filter;
+                return matchSearch && matchFilter;
+            }});
+
+            const working = teamData.filter(m => m.status === 'working').length;
+            const onBreak = teamData.filter(m => m.status === 'break').length;
+            const offline = teamData.filter(m => m.status === 'offline').length;
+            const totalScans = teamData.reduce((s, m) => s + (m.total_scans_today || 0), 0);
+
+            document.getElementById('team-stats').innerHTML = `
+                <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--accent);">
+                    <div style="font-size: 1.5rem; font-weight: 700;">${{teamData.length}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">Total</div>
+                </div>
+                <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--green);">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: var(--green);">${{working}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">Working</div>
+                </div>
+                <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--orange);">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: var(--orange);">${{onBreak}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">On Break</div>
+                </div>
+                <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid #6b7280;">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: #6b7280;">${{offline}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">Offline</div>
+                </div>
+                <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--orange);">
+                    <div style="font-size: 1.5rem; font-weight: 700;">${{totalScans}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">Scans Today</div>
+                </div>
+            `;
+
+            if (filtered.length === 0) {{
+                document.getElementById('team-container').innerHTML = '<div style="text-align:center; padding:2rem; color:var(--text-muted);">No team members found. Add members to get started.</div>';
+                return;
+            }}
+
+            document.getElementById('team-container').innerHTML = filtered.map(m => {{
+                const statusColor = m.status === 'working' ? 'var(--green)' : m.status === 'break' ? 'var(--orange)' : '#6b7280';
+                const statusIcon = m.status === 'working' ? '🟢' : m.status === 'break' ? '☕' : '⚫';
+                const statusText = m.status === 'working' ? 'Working' : m.status === 'break' ? 'On Break' : 'Offline';
+                const initials = m.display_name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
+                const avatarColor = m.avatar_color || '#6366f1';
+                const adminBadge = m.is_admin ? '<span style="background:var(--orange); color:#000; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.65rem; margin-left:0.5rem;">ADMIN</span>' : '';
+                const elapsed = m.clock_in ? formatElapsed(m.clock_in) : '';
+
+                return `<div style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; margin-bottom: 0.75rem; border-left: 4px solid ${{statusColor}};">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                            <div style="width:40px; height:40px; border-radius:50%; background:${{avatarColor}}; display:flex; align-items:center; justify-content:center; color:white; font-weight:600; font-size:0.85rem;">${{initials}}</div>
+                            <div>
+                                <div style="font-weight: 600;">${{m.display_name}}${{adminBadge}} <span style="color:var(--text-muted); font-size:0.75rem; margin-left:0.5rem;">${{m.role}}</span></div>
+                                <div style="color:var(--text-muted); font-size:0.8rem;">${{m.device_id}}</div>
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: ${{statusColor}}; font-weight: 600;">${{statusIcon}} ${{statusText}}</div>
+                            ${{m.current_job ? `<div style="font-size:0.8rem; color:var(--text-muted);">${{m.current_job}}</div>` : ''}}
+                            ${{elapsed ? `<div style="font-size:0.8rem; color:var(--text-muted);">${{elapsed}}</div>` : ''}}
+                            <div style="font-size:0.8rem; color:var(--text-muted);">📊 ${{m.total_scans_today}} scans today</div>
+                        </div>
+                    </div>
+                </div>`;
+            }}).join('');
+        }}
+
+        function filterTeam() {{ renderTeam(); }}
+
+        function showAddMemberModal() {{
+            const name = prompt('Team member display name:');
+            if (!name) return;
+            const deviceId = prompt('Device ID (from the Devices tab):');
+            if (!deviceId) return;
+            const role = prompt('Role (worker/lead/manager):', 'worker') || 'worker';
+            const isAdmin = confirm('Grant admin access?');
+
+            fetch('/api/team/members', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ device_id: deviceId, display_name: name, role: role, is_admin: isAdmin }})
+            }}).then(() => loadTeamStatus());
+        }}
+
+        // ==================== TIMESHEETS ====================
+
+        async function loadTimesheets() {{
+            try {{
+                const workerFilter = document.getElementById('ts-worker-filter')?.value || 'all';
+                const dateFrom = document.getElementById('ts-date-from')?.value || '';
+                const dateTo = document.getElementById('ts-date-to')?.value || '';
+
+                let url = '/api/timesheets?limit=500';
+                if (workerFilter !== 'all') url += `&device_id=${{encodeURIComponent(workerFilter)}}`;
+                if (dateFrom) url += `&date_from=${{dateFrom}}`;
+                if (dateTo) url += `&date_to=${{dateTo}}`;
+
+                const response = await fetch(url);
+                const data = await response.json();
+                if (!data.success) return;
+                const days = data.days || [];
+
+                // Populate worker dropdown
+                const workers = [...new Set(days.map(d => JSON.stringify({{id: d.device_id, name: d.display_name}})))];
+                const filterEl = document.getElementById('ts-worker-filter');
+                const curVal = filterEl.value;
+                filterEl.innerHTML = '<option value="all">All Workers</option>' +
+                    workers.map(w => {{ const p = JSON.parse(w); return `<option value="${{p.id}}" ${{p.id === curVal ? 'selected' : ''}}>${{p.name}}</option>`; }}).join('');
+
+                // Stats
+                const totalWorkH = days.reduce((s, d) => s + d.total_work_seconds / 3600, 0).toFixed(1);
+                const totalBreakH = days.reduce((s, d) => s + d.total_break_seconds / 3600, 0).toFixed(1);
+                const gpsDays = days.filter(d => d.has_gps).length;
+                document.getElementById('ts-stats').innerHTML = `
+                    <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--accent);">
+                        <div style="font-size: 1.5rem; font-weight: 700;">${{days.length}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">Days</div>
+                    </div>
+                    <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--green);">
+                        <div style="font-size: 1.5rem; font-weight: 700; color: var(--green);">${{totalWorkH}}h</div><div style="color: var(--text-muted); font-size: 0.8rem;">Work</div>
+                    </div>
+                    <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid var(--orange);">
+                        <div style="font-size: 1.5rem; font-weight: 700; color: var(--orange);">${{totalBreakH}}h</div><div style="color: var(--text-muted); font-size: 0.8rem;">Break</div>
+                    </div>
+                    <div style="background: var(--card); border-radius: 12px; padding: 1rem 1.25rem; min-width: 120px; border-left: 4px solid #8b5cf6;">
+                        <div style="font-size: 1.5rem; font-weight: 700; color: #8b5cf6;">${{gpsDays}}</div><div style="color: var(--text-muted); font-size: 0.8rem;">GPS Days</div>
+                    </div>
+                `;
+
+                if (days.length === 0) {{
+                    document.getElementById('timesheets-container').innerHTML = '<div style="text-align:center; padding:2rem; color:var(--text-muted);">No timesheet entries found</div>';
+                    return;
+                }}
+
+                document.getElementById('timesheets-container').innerHTML = days.map(day => {{
+                    const workH = (day.total_work_seconds / 3600).toFixed(1);
+                    const breakH = (day.total_break_seconds / 3600).toFixed(1);
+                    const mapBtn = day.has_gps
+                        ? `<button class="btn btn-sm" style="background:#8b5cf6; color:white; border:none; padding:0.25rem 0.75rem; border-radius:6px; cursor:pointer; font-size:0.75rem;" onclick="openTimesheetMap('${{day.device_id}}','${{day.date}}')">🗺️ Map</button>`
+                        : '';
+
+                    const entriesHtml = day.entries.map(e => {{
+                        const type = e.is_break ? '<span style="color:var(--orange);">☕ Break</span>' : '<span style="color:var(--green);">🟢 Work</span>';
+                        const dur = e.clock_out ? formatDuration(e.clock_in, e.clock_out) : '<span style="color:var(--green);">Active</span>';
+                        const job = e.job_name || e.customer_name || '-';
+                        return `<tr>
+                            <td style="padding:0.4rem 0.75rem;">${{type}}</td>
+                            <td style="padding:0.4rem 0.75rem;">${{job}}</td>
+                            <td style="padding:0.4rem 0.75rem;">${{formatDateTime(e.clock_in)}}</td>
+                            <td style="padding:0.4rem 0.75rem;">${{e.clock_out ? formatDateTime(e.clock_out) : '-'}}</td>
+                            <td style="padding:0.4rem 0.75rem;">${{dur}}</td>
+                        </tr>`;
+                    }}).join('');
+
+                    return `<details style="background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 0.75rem;">
+                        <summary style="padding: 1rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                            <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
+                                <strong>${{day.date}}</strong>
+                                <span style="color:#8b5cf6;">${{day.display_name}}</span>
+                                <span style="color:var(--green); font-size:0.85rem;">🟢 ${{workH}}h work</span>
+                                ${{parseFloat(breakH) > 0 ? `<span style="color:var(--orange); font-size:0.85rem;">☕ ${{breakH}}h break</span>` : ''}}
+                                <span style="color:var(--text-muted); font-size:0.8rem;">${{day.entries.length}} entries</span>
+                            </div>
+                            <div style="display:flex; gap:0.5rem; align-items:center;">${{mapBtn}}</div>
+                        </summary>
+                        <div style="padding: 0 1rem 1rem;">
+                            <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+                                <thead><tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+                                    <th style="padding:0.4rem 0.75rem; text-align:left;">Type</th>
+                                    <th style="padding:0.4rem 0.75rem; text-align:left;">Job</th>
+                                    <th style="padding:0.4rem 0.75rem; text-align:left;">Clock In</th>
+                                    <th style="padding:0.4rem 0.75rem; text-align:left;">Clock Out</th>
+                                    <th style="padding:0.4rem 0.75rem; text-align:left;">Duration</th>
+                                </tr></thead>
+                                <tbody>${{entriesHtml}}</tbody>
+                            </table>
+                        </div>
+                    </details>`;
+                }}).join('');
+
+            }} catch (e) {{
+                console.error('Failed to load timesheets:', e);
+            }}
+        }}
+
+        async function openTimesheetMap(deviceId, date) {{
+            try {{
+                // Fetch time entries for this device on this date
+                const teResp = await fetch(`/api/time-entries?device_id=${{encodeURIComponent(deviceId)}}&limit=100`);
+                const teData = await teResp.json();
+                if (!teData.success) return;
+
+                const dayEntries = (teData.entries || []).filter(e => e.clock_in && e.clock_in.startsWith(date));
+                if (dayEntries.length === 0) {{ alert('No time entries found for this day'); return; }}
+
+                // Fetch location pings for each entry
+                let allPings = [];
+                for (const entry of dayEntries) {{
+                    const pingResp = await fetch(`/api/location-pings?time_entry_id=${{encodeURIComponent(entry.uuid)}}&limit=5000`);
+                    const pingData = await pingResp.json();
+                    if (pingData.success && pingData.pings) allPings = allPings.concat(pingData.pings);
+                }}
+
+                if (allPings.length === 0) {{ alert('No GPS data for this day'); return; }}
+
+                // Open map in new window with pings plotted on OpenStreetMap
+                const mapHtml = buildMapHtml(allPings, deviceId, date);
+                const w = window.open('', '_blank', 'width=800,height=600');
+                w.document.write(mapHtml);
+                w.document.close();
+            }} catch (e) {{
+                console.error('Failed to open map:', e);
+                alert('Failed to load GPS data');
+            }}
+        }}
+
+        function buildMapHtml(pings, deviceId, date) {{
+            const centerLat = pings.reduce((s, p) => s + p.latitude, 0) / pings.length;
+            const centerLon = pings.reduce((s, p) => s + p.longitude, 0) / pings.length;
+            const points = JSON.stringify(pings.map(p => [p.latitude, p.longitude, p.timestamp]));
+            return `<!DOCTYPE html><html><head><title>GPS Track - ${{deviceId}} - ${{date}}</title>
+                <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+                <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
+                <style>body{{margin:0}} #map{{width:100vw;height:100vh}}</style></head><body>
+                <div id="map"></div><script>
+                const points = ${{points}};
+                const map = L.map('map').setView([${{centerLat}}, ${{centerLon}}], 14);
+                L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{attribution:'OSM'}}).addTo(map);
+                const line = points.map(p => [p[0], p[1]]);
+                L.polyline(line, {{color:'#6366f1', weight:3}}).addTo(map);
+                if (points.length > 0) {{
+                    L.circleMarker([points[0][0], points[0][1]], {{radius:8, color:'#22c55e', fillOpacity:1}}).addTo(map).bindPopup('Start: ' + new Date(points[0][2]).toLocaleTimeString());
+                    const last = points[points.length-1];
+                    L.circleMarker([last[0], last[1]], {{radius:8, color:'#ef4444', fillOpacity:1}}).addTo(map).bindPopup('End: ' + new Date(last[2]).toLocaleTimeString());
+                }}
+                points.forEach((p, i) => {{
+                    if (i % Math.max(1, Math.floor(points.length / 20)) === 0) {{
+                        L.circleMarker([p[0], p[1]], {{radius:4, color:'#6366f1', fillOpacity:0.7}}).addTo(map)
+                            .bindPopup(new Date(p[2]).toLocaleTimeString());
+                    }}
+                }});
+                map.fitBounds(L.polyline(line).getBounds().pad(0.1));
+                <\/script></body></html>`;
         }}
     </script>
 </body>
