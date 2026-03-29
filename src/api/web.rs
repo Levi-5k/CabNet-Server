@@ -1,4 +1,4 @@
-//! Web dashboard for CabNet Server
+﻿//! Web dashboard for CabNet Server
 //! Serves a responsive web interface on the root domain
 
 use axum::{
@@ -549,15 +549,11 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
     let scan_count = state.repo.get_scan_count().await.unwrap_or(0) as usize;
     let job_count = state.repo.get_jobs().await.map(|j| j.len()).unwrap_or(0);
     let uptime_secs = state.start_time.elapsed().as_secs();
-    let pending_count = state.repo.get_pending_change_count().await.unwrap_or(0);
     let recent_scans = state.repo.get_scans(None, None, None, 5).await.unwrap_or_default();
     let jobs_with_counts = state.repo.get_jobs_with_counts().await.unwrap_or_default();
-    let time_entry_count = state.repo.get_time_entry_count().await.unwrap_or(0);
     let active_workers = state.repo.get_active_time_entries().await.unwrap_or_default();
     let report_count = state.repo.get_report_count().await.unwrap_or(0);
     let active_worker_count = active_workers.len();
-    
-    let scans_per_device = if device_count > 0 { scan_count / device_count } else { 0 };
     let uptime = format_uptime(uptime_secs);
     let version = env!("CARGO_PKG_VERSION");
     
@@ -2016,41 +2012,32 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     <button class="btn btn-outline" onclick="refreshAll()">🔄 Refresh</button>
                 </div>
                 
+                <!-- Top Stats Row -->
                 <div class="stats">
-                    <div class="stat-card">
-                        <div class="stat-icon">�</div>
+                    <div class="stat-card" onclick="showPage('devices')" style="cursor:pointer;">
+                        <div class="stat-icon">📱</div>
                         <div class="stat-value" id="stat-devices">{device_count}</div>
                         <div class="stat-label">Devices</div>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="showPage('scans')" style="cursor:pointer;">
                         <div class="stat-icon">🏷️</div>
                         <div class="stat-value" id="stat-scans">{scan_count}</div>
                         <div class="stat-label">Scans</div>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="showPage('jobs')" style="cursor:pointer;">
                         <div class="stat-icon">🗂️</div>
                         <div class="stat-value" id="stat-jobs">{job_count}</div>
                         <div class="stat-label">Jobs</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">⏱️</div>
-                        <div class="stat-value" id="stat-uptime">{uptime}</div>
-                        <div class="stat-label">Uptime</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">⚠️</div>
-                        <div class="stat-value" id="stat-pending">{pending_count}</div>
-                        <div class="stat-label">Pending</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">📈</div>
-                        <div class="stat-value" id="stat-ratio">{scans_per_device}</div>
-                        <div class="stat-label">Scans/Device</div>
                     </div>
                     <div class="stat-card" onclick="showPage('timeclock')" style="cursor:pointer;">
                         <div class="stat-icon">⏱️</div>
                         <div class="stat-value" id="stat-workers">{active_worker_count}</div>
                         <div class="stat-label">Working Now</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-value" id="stat-uptime">{uptime}</div>
+                        <div class="stat-label">Uptime</div>
                     </div>
                     <div class="stat-card" onclick="showPage('reports')" style="cursor:pointer;">
                         <div class="stat-icon">📋</div>
@@ -2058,48 +2045,102 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                         <div class="stat-label">Reports</div>
                     </div>
                 </div>
-                
-                <div class="cards-grid">
+
+                <!-- Team Status (condensed) -->
+                <div class="card" style="margin-bottom: 1rem;">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h3>👥 Team Status</h3>
+                        <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('team')">View All →</button>
+                    </div>
+                    <div class="card-body" id="dash-team-status">
+                        <div style="text-align: center; color: var(--text-muted); padding: 1rem;"><div class="spinner"></div>Loading team...</div>
+                    </div>
+                </div>
+
+                <!-- Two column grid: Today's Reports + Job Progress -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+                    <!-- Today's Reports -->
                     <div class="card">
-                        <div class="card-header">
-                            <h3>🚀 Quick Actions</h3>
+                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>📋 Today's Reports</h3>
+                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('reports')">View All →</button>
                         </div>
-                        <div class="card-body">
-                            <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-                                <button class="btn btn-primary" onclick="showPage('jobs'); openJobModal()">+ New Job</button>
-                                <button class="btn btn-outline" onclick="showPage('scans')">View Scans</button>
-                                <button class="btn btn-outline" onclick="showPage('devices')">Manage Devices</button>
-                            </div>
+                        <div class="card-body" id="dash-reports">
+                            <div style="text-align: center; color: var(--text-muted); padding: 1rem;"><div class="spinner"></div>Loading...</div>
                         </div>
                     </div>
-                    
+
+                    <!-- Job Progress -->
                     <div class="card">
-                        <div class="card-header">
-                            <h3>�️ Server Info</h3>
+                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>🗂️ Job Progress</h3>
+                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('jobs')">View All →</button>
                         </div>
                         <div class="card-body">
-                            <p style="color: var(--text-muted);">
-                                <strong>Version:</strong> {version}<br>
-                                <strong>Status:</strong> <span class="badge badge-success">Online</span>
-                            </p>
+                            {jobs_status_html}
                         </div>
                     </div>
-                    
+                </div>
+
+                <!-- Two column grid: Recent Activity + Quick Actions -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+                    <!-- Recent Activity -->
                     <div class="card">
-                        <div class="card-header">
-                            <h3>� Recent Activity</h3>
+                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>📡 Recent Activity</h3>
+                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('scans')">View All →</button>
                         </div>
                         <div class="card-body">
                             {recent_scans_html}
                         </div>
                     </div>
-                    
+
+                    <!-- Quick Actions + Server Info -->
                     <div class="card">
                         <div class="card-header">
-                            <h3>�️ Job Status</h3>
+                            <h3>🚀 Quick Actions</h3>
                         </div>
                         <div class="card-body">
-                            {jobs_status_html}
+                            <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                                <button class="btn btn-primary" onclick="showPage('jobs'); openJobModal()">+ New Job</button>
+                                <button class="btn btn-outline" onclick="showPage('scans')">View Scans</button>
+                                <button class="btn btn-outline" onclick="showPage('devices')">Manage Devices</button>
+                                <button class="btn btn-outline" onclick="showPage('timesheets')">📋 Timesheets</button>
+                            </div>
+                            <div style="font-size: 0.85rem; color: var(--text-muted);">
+                                <strong>Version:</strong> {version} · <span class="badge badge-success">Online</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Admin Section (only for trusted devices) -->
+                <div id="dash-admin-section" style="display: none;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.85rem;">
+                        <span style="background: var(--accent); color: white; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600;">ADMIN</span>
+                        <span>Administrator View</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem;">
+                        <!-- Pending Approvals -->
+                        <div class="card">
+                            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h3>⚠️ Pending Approvals</h3>
+                                <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('approvals')">Manage →</button>
+                            </div>
+                            <div class="card-body" id="dash-pending-approvals">
+                                <p style="color: var(--text-muted); font-style: italic;">Loading...</p>
+                            </div>
+                        </div>
+
+                        <!-- Today's Hours (all workers) -->
+                        <div class="card">
+                            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h3>⏱️ Today's Hours</h3>
+                                <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('timesheets')">Timesheets →</button>
+                            </div>
+                            <div class="card-body" id="dash-today-hours">
+                                <p style="color: var(--text-muted); font-style: italic;">Loading...</p>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2898,6 +2939,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             
             loadJobs();
             loadDevices();
+            loadDashboardHome();
             
             updateClientDisplay();
         }}
@@ -3174,6 +3216,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             }}
             
             // Load data for page
+            if (pageId === 'dashboard') loadDashboardHome();
             if (pageId === 'jobs') loadJobs();
             if (pageId === 'devices') loadDevices();
             if (pageId === 'scans') loadScans();
@@ -4202,6 +4245,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             loadJobs();
             loadDevices();
             loadScans();
+            loadDashboardHome();
             checkClientStatus();
             showToast('success', 'Data refreshed');
         }}
@@ -4501,6 +4545,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             loadDevices();
             loadTimeEntries();
             const activePage = document.querySelector('.page.active')?.id;
+            if (activePage === 'page-dashboard') loadDashboardHome();
             if (activePage === 'page-team') loadTeamStatus();
             if (activePage === 'page-timesheets') loadTimesheets();
         }}, 60000);
@@ -4695,6 +4740,193 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             // Future: expand or open a detail modal
             el.style.borderColor = 'var(--accent)';
             setTimeout(() => el.style.borderColor = 'var(--border)', 1500);
+        }}
+
+        // ==================== DASHBOARD HOME ====================
+
+        async function loadDashboardHome() {{
+            // 1. Team status (condensed)
+            try {{
+                const resp = await fetch('/api/team/status');
+                const data = await resp.json();
+                if (data.success) {{
+                    const members = data.members || [];
+                    const container = document.getElementById('dash-team-status');
+                    if (!container) return;
+
+                    if (members.length === 0) {{
+                        container.innerHTML = '<p style="color: var(--text-muted); font-style: italic;">No team members yet. <a href="#" onclick="showPage(\'team\')" style="color: var(--accent);">Add team members →</a></p>';
+                    }} else {{
+                        const working = members.filter(m => m.status === 'working');
+                        const onBreak = members.filter(m => m.status === 'break');
+                        const offline = members.filter(m => m.status === 'offline');
+
+                        // Summary bar
+                        let html = `<div style="display: flex; gap: 1rem; margin-bottom: 0.75rem; font-size: 0.85rem; flex-wrap: wrap;">
+                            <span style="color: var(--success); font-weight: 600;">🟢 ${{working.length}} Working</span>
+                            <span style="color: var(--warning); font-weight: 600;">☕ ${{onBreak.length}} Break</span>
+                            <span style="color: #6b7280; font-weight: 600;">⚫ ${{offline.length}} Offline</span>
+                        </div>`;
+
+                        // Show active members as compact chips (up to 10)
+                        const active = [...working, ...onBreak].slice(0, 10);
+                        if (active.length > 0) {{
+                            html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+                            active.forEach(m => {{
+                                const color = m.status === 'working' ? 'var(--success)' : 'var(--warning)';
+                                const icon = m.status === 'working' ? '🟢' : '☕';
+                                const initials = m.display_name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
+                                const avatarColor = m.avatar_color || '#6366f1';
+                                const jobText = m.current_job ? ` · ${{m.current_job}}` : '';
+                                html += `<div style="display: flex; align-items: center; gap: 0.5rem; background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.75rem 0.3rem 0.3rem;">
+                                    <div style="width: 28px; height: 28px; border-radius: 50%; background: ${{avatarColor}}; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.7rem; font-weight: 600;">${{initials}}</div>
+                                    <div>
+                                        <div style="font-size: 0.8rem; font-weight: 500;">${{icon}} ${{m.display_name}}</div>
+                                        <div style="font-size: 0.7rem; color: var(--text-muted);">${{m.total_scans_today || 0}} scans${{jobText}}</div>
+                                    </div>
+                                </div>`;
+                            }});
+                            const remaining = [...working, ...onBreak].length - 10;
+                            if (remaining > 0) {{
+                                html += `<div style="display:flex;align-items:center;padding:0 0.5rem;color:var(--text-muted);font-size:0.8rem;">+${{remaining}} more</div>`;
+                            }}
+                            html += '</div>';
+                        }}
+
+                        container.innerHTML = html;
+                    }}
+                }}
+            }} catch (e) {{ console.error('Dashboard team load failed:', e); }}
+
+            // 2. Today's reports (condensed)
+            try {{
+                const resp = await fetch('/api/reports?limit=500');
+                const data = await resp.json();
+                if (data.success) {{
+                    const reports = data.reports || [];
+                    const today = new Date().toISOString().split('T')[0];
+                    const todayReports = reports.filter(r => r.created_at && r.created_at.startsWith(today));
+                    const container = document.getElementById('dash-reports');
+                    if (!container) return;
+
+                    if (todayReports.length === 0) {{
+                        container.innerHTML = '<p style="color: var(--text-muted); font-style: italic;">No reports today yet</p>';
+                    }} else {{
+                        const complete = todayReports.filter(r => r.is_complete).length;
+                        const inProgress = todayReports.filter(r => r.status === 'in_progress').length;
+
+                        let html = `<div style="display: flex; gap: 1rem; margin-bottom: 0.75rem; font-size: 0.85rem;">
+                            <span style="font-weight: 600;">${{todayReports.length}} reports today</span>
+                            <span style="color: var(--success);">✅ ${{complete}} complete</span>
+                            ${{inProgress > 0 ? `<span style="color: var(--warning);">🟡 ${{inProgress}} in progress</span>` : ''}}
+                        </div>`;
+
+                        // Show latest 4 reports as condensed rows
+                        todayReports.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                        todayReports.slice(0, 4).forEach(r => {{
+                            const statusColor = r.is_complete ? 'var(--success)' : r.status === 'in_progress' ? 'var(--warning)' : 'var(--text-muted)';
+                            const statusIcon = r.is_complete ? '✅' : r.status === 'in_progress' ? '🟡' : '📋';
+                            html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--border);">
+                                <div>
+                                    <span style="font-weight: 500; font-size: 0.9rem;">${{r.title}}</span>
+                                    <span style="color: var(--text-muted); font-size: 0.8rem; margin-left: 0.5rem;">${{r.room_name || ''}}</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <span style="color: var(--text-muted); font-size: 0.75rem;">${{r.author_name || ''}}</span>
+                                    <span style="color: ${{statusColor}}; font-size: 0.85rem;">${{statusIcon}}</span>
+                                </div>
+                            </div>`;
+                        }});
+                        if (todayReports.length > 4) {{
+                            html += `<div style="text-align: center; padding: 0.5rem; font-size: 0.8rem;"><a href="#" onclick="showPage('reports')" style="color: var(--accent);">View all ${{todayReports.length}} reports →</a></div>`;
+                        }}
+                        container.innerHTML = html;
+                    }}
+                }}
+            }} catch (e) {{ console.error('Dashboard reports load failed:', e); }}
+
+            // 3. Admin section (only if trusted)
+            if (isTrusted) {{
+                const adminSection = document.getElementById('dash-admin-section');
+                if (adminSection) adminSection.style.display = '';
+
+                // Pending approvals
+                try {{
+                    const resp = await fetch('/api/web/changes/pending');
+                    const data = await resp.json();
+                    if (data.success) {{
+                        const changes = data.changes || [];
+                        const container = document.getElementById('dash-pending-approvals');
+                        if (container) {{
+                            if (changes.length === 0) {{
+                                container.innerHTML = '<p style="color: var(--success);">✅ No pending approvals</p>';
+                            }} else {{
+                                let html = `<div style="font-size: 0.85rem; font-weight: 600; color: var(--warning); margin-bottom: 0.5rem;">⚠️ ${{changes.length}} pending</div>`;
+                                changes.slice(0, 5).forEach(c => {{
+                                    html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;">
+                                        <div>
+                                            <span style="font-weight: 500;">${{c.change_type}}</span>
+                                            <span style="color: var(--text-muted); margin-left: 0.5rem;">${{c.client_name || 'Unknown'}}</span>
+                                        </div>
+                                        <div style="display: flex; gap: 0.3rem;">
+                                            <button class="btn" style="font-size: 0.7rem; padding: 0.2rem 0.5rem; background: var(--success); color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="approveChange(${{c.id}}); loadDashboardHome();">✓</button>
+                                            <button class="btn" style="font-size: 0.7rem; padding: 0.2rem 0.5rem; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="rejectChange(${{c.id}}); loadDashboardHome();">✕</button>
+                                        </div>
+                                    </div>`;
+                                }});
+                                if (changes.length > 5) {{
+                                    html += `<div style="text-align: center; padding: 0.5rem; font-size: 0.8rem;"><a href="#" onclick="showPage('approvals')" style="color: var(--accent);">View all ${{changes.length}} →</a></div>`;
+                                }}
+                                container.innerHTML = html;
+                            }}
+                        }}
+                    }}
+                }} catch (e) {{ console.error('Dashboard approvals failed:', e); }}
+
+                // Today's hours for all workers
+                try {{
+                    const today = new Date().toISOString().split('T')[0];
+                    const resp = await fetch(`/api/timesheets?date_from=${{today}}&date_to=${{today}}&limit=500`);
+                    const data = await resp.json();
+                    if (data.success) {{
+                        const days = data.days || [];
+                        const container = document.getElementById('dash-today-hours');
+                        if (container) {{
+                            if (days.length === 0) {{
+                                container.innerHTML = '<p style="color: var(--text-muted); font-style: italic;">No clock-ins today</p>';
+                            }} else {{
+                                const totalWork = days.reduce((s, d) => s + d.total_work_seconds, 0);
+                                const totalBreak = days.reduce((s, d) => s + d.total_break_seconds, 0);
+                                const workH = (totalWork / 3600).toFixed(1);
+                                const breakH = (totalBreak / 3600).toFixed(1);
+
+                                let html = `<div style="display: flex; gap: 1rem; margin-bottom: 0.75rem; font-size: 0.85rem;">
+                                    <span style="font-weight: 600;">${{days.length}} workers</span>
+                                    <span style="color: var(--success);">🟢 ${{workH}}h work</span>
+                                    ${{parseFloat(breakH) > 0 ? `<span style="color: var(--warning);">☕ ${{breakH}}h break</span>` : ''}}
+                                </div>`;
+
+                                days.forEach(d => {{
+                                    const wH = (d.total_work_seconds / 3600).toFixed(1);
+                                    const bH = (d.total_break_seconds / 3600).toFixed(1);
+                                    html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;">
+                                        <span style="font-weight: 500;">${{d.display_name}}</span>
+                                        <div>
+                                            <span style="color: var(--success);">${{wH}}h</span>
+                                            ${{parseFloat(bH) > 0 ? `<span style="color: var(--warning); margin-left: 0.5rem;">${{bH}}h break</span>` : ''}}
+                                            ${{d.entries.length > 0 ? `<span style="color: var(--text-muted); margin-left: 0.5rem;">${{d.entries.length}} entries</span>` : ''}}
+                                        </div>
+                                    </div>`;
+                                }});
+                                container.innerHTML = html;
+                            }}
+                        }}
+                    }}
+                }} catch (e) {{ console.error('Dashboard hours failed:', e); }}
+            }} else {{
+                const adminSection = document.getElementById('dash-admin-section');
+                if (adminSection) adminSection.style.display = 'none';
+            }}
         }}
 
         // ==================== TEAM ====================
