@@ -1895,7 +1895,13 @@ pub async fn sync_reports(
 
     for report in &request.reports {
         match state.repo.upsert_report(report).await {
-            Ok(_) => synced_ids.push(report.id.clone()),
+            Ok(_) => {
+                // Auto-update room progress from this report
+                if let Err(e) = state.repo.update_room_progress_from_report(report).await {
+                    tracing::warn!("Failed to update room progress for report {}: {}", report.id, e);
+                }
+                synced_ids.push(report.id.clone());
+            }
             Err(e) => tracing::warn!("Failed to sync report {}: {}", report.id, e),
         }
     }
@@ -2187,4 +2193,58 @@ pub async fn get_timesheets(
 
     let total = days.len();
     Ok(Json(ApiResponse::success(TimesheetsResponse { days, total })))
+}
+
+// ==================== ROOM PROGRESS ====================
+
+#[derive(Deserialize)]
+pub struct GetRoomProgressQuery {
+    pub search: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RoomProgressResponse {
+    pub rooms: Vec<crate::db::models::RoomProgress>,
+    pub summary: crate::db::models::RoomProgressSummary,
+}
+
+/// GET /api/jobs/:job_id/rooms - Get room progress for a job with optional search
+pub async fn get_job_rooms(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+    Query(query): Query<GetRoomProgressQuery>,
+) -> Result<Json<ApiResponse<RoomProgressResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    // Resolve job UUID to internal job_id
+    let job_uuid = job_id;
+
+    let rooms = if let Some(ref search) = query.search {
+        if !search.is_empty() {
+            state.repo.search_room_progress(&job_uuid, search).await
+        } else {
+            state.repo.get_room_progress_for_job(&job_uuid).await
+        }
+    } else {
+        state.repo.get_room_progress_for_job(&job_uuid).await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    let summary = state.repo.get_room_progress_summary(&job_uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::success(RoomProgressResponse { rooms, summary })))
+}
+
+/// GET /api/jobs/:job_id/rooms/:room_name - Get a single room's progress
+pub async fn get_room_detail(
+    State(state): State<SharedState>,
+    Path((job_id, room_name)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<Option<crate::db::models::RoomProgress>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let room = state.repo.get_room_progress(&job_id, &room_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::success(room)))
 }

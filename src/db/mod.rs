@@ -504,6 +504,40 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Room progress tracking table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS room_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            room_name TEXT NOT NULL,
+            cabinet_count INTEGER DEFAULT 0,
+            is_complete INTEGER DEFAULT 0,
+            has_fillers INTEGER DEFAULT 0,
+            has_handles INTEGER DEFAULT 0,
+            has_fast_caps INTEGER DEFAULT 0,
+            has_set_boxes INTEGER DEFAULT 0,
+            has_caulking INTEGER DEFAULT 0,
+            punch_list TEXT,
+            notes TEXT,
+            last_report_id TEXT,
+            last_updated_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_id, room_name)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_room_progress_job_id ON room_progress(job_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_room_progress_room_name ON room_progress(room_name)")
+        .execute(pool)
+        .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }

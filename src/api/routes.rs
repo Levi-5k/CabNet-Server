@@ -87,6 +87,9 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/reports", get(handlers::get_reports))
         .route("/api/reports", post(handlers::sync_reports))
         .route("/api/reports/:report_id/photos", post(handlers::upload_report_photo))
+        // Room Progress
+        .route("/api/jobs/:job_id/rooms", get(handlers::get_job_rooms))
+        .route("/api/jobs/:job_id/rooms/:room_name", get(handlers::get_room_detail))
         // Location Pings (GPS tracking)
         .route("/api/location-pings", post(handlers::sync_location_pings))
         .route("/api/location-pings", get(handlers::get_location_pings))

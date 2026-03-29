@@ -489,3 +489,50 @@ pub struct TimesheetDay {
     pub total_break_seconds: i64,
     pub has_gps: bool,
 }
+
+// ─── Room Progress ─────────────────────────────────────────
+
+/// Room progress record from database
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RoomProgress {
+    pub id: i64,
+    pub job_id: String,
+    pub room_name: String,
+    pub cabinet_count: i32,
+    pub is_complete: i32,
+    pub has_fillers: i32,
+    pub has_handles: i32,
+    pub has_fast_caps: i32,
+    pub has_set_boxes: i32,
+    pub has_caulking: i32,
+    pub punch_list: Option<String>,
+    pub notes: Option<String>,
+    pub last_report_id: Option<String>,
+    pub last_updated_by: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Room progress input for creating/updating
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomProgressInput {
+    pub job_id: String,
+    pub room_name: String,
+    pub cabinet_count: Option<i32>,
+    pub is_complete: Option<bool>,
+    pub has_fillers: Option<bool>,
+    pub has_handles: Option<bool>,
+    pub has_fast_caps: Option<bool>,
+    pub has_set_boxes: Option<bool>,
+    pub has_caulking: Option<bool>,
+    pub punch_list: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Summary stats for room progress on a job
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomProgressSummary {
+    pub total_rooms: i64,
+    pub completed_rooms: i64,
+    pub total_cabinets: i64,
+}

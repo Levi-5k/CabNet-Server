@@ -2193,4 +2193,170 @@ impl Repository {
 
         Ok(result)
     }
+
+    // ==================== ROOM PROGRESS ====================
+
+    /// Upsert room progress — updates existing or inserts new
+    pub async fn upsert_room_progress(
+        &self,
+        job_id: &str,
+        room_name: &str,
+        cabinet_count: i32,
+        is_complete: bool,
+        has_fillers: bool,
+        has_handles: bool,
+        has_fast_caps: bool,
+        has_set_boxes: bool,
+        has_caulking: bool,
+        punch_list: Option<&str>,
+        notes: Option<&str>,
+        report_id: Option<&str>,
+        updated_by: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"INSERT INTO room_progress (job_id, room_name, cabinet_count, is_complete, has_fillers, has_handles, has_fast_caps, has_set_boxes, has_caulking, punch_list, notes, last_report_id, last_updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, room_name) DO UPDATE SET
+                cabinet_count = excluded.cabinet_count,
+                is_complete = excluded.is_complete,
+                has_fillers = excluded.has_fillers,
+                has_handles = excluded.has_handles,
+                has_fast_caps = excluded.has_fast_caps,
+                has_set_boxes = excluded.has_set_boxes,
+                has_caulking = excluded.has_caulking,
+                punch_list = excluded.punch_list,
+                notes = excluded.notes,
+                last_report_id = excluded.last_report_id,
+                last_updated_by = excluded.last_updated_by,
+                updated_at = excluded.updated_at"#,
+        )
+        .bind(job_id)
+        .bind(room_name)
+        .bind(cabinet_count)
+        .bind(is_complete as i32)
+        .bind(has_fillers as i32)
+        .bind(has_handles as i32)
+        .bind(has_fast_caps as i32)
+        .bind(has_set_boxes as i32)
+        .bind(has_caulking as i32)
+        .bind(punch_list)
+        .bind(notes)
+        .bind(report_id)
+        .bind(updated_by)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Update room progress from a report (auto-called when reports are synced)
+    pub async fn update_room_progress_from_report(&self, report: &ReportInput) -> anyhow::Result<()> {
+        let room_name = match &report.room_name {
+            Some(name) if !name.is_empty() => name.clone(),
+            _ => return Ok(()), // No room name, skip
+        };
+        let job_id = match &report.job_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => return Ok(()), // No job id, skip
+        };
+
+        self.upsert_room_progress(
+            &job_id,
+            &room_name,
+            report.cabinet_count.unwrap_or(0),
+            report.is_complete.unwrap_or(false),
+            report.has_fillers.unwrap_or(false),
+            report.has_handles.unwrap_or(false),
+            report.has_fast_caps.unwrap_or(false),
+            report.has_set_boxes.unwrap_or(false),
+            report.has_caulking.unwrap_or(false),
+            report.punch_list.as_deref(),
+            report.notes.as_deref(),
+            Some(&report.id),
+            report.author_name.as_deref(),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all room progress for a job
+    pub async fn get_room_progress_for_job(&self, job_id: &str) -> anyhow::Result<Vec<RoomProgress>> {
+        let rooms = sqlx::query_as::<_, RoomProgress>(
+            "SELECT * FROM room_progress WHERE job_id = ? ORDER BY room_name ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rooms)
+    }
+
+    /// Search rooms by name within a job
+    pub async fn search_room_progress(
+        &self,
+        job_id: &str,
+        query: &str,
+    ) -> anyhow::Result<Vec<RoomProgress>> {
+        let pattern = format!("%{}%", query);
+        let rooms = sqlx::query_as::<_, RoomProgress>(
+            "SELECT * FROM room_progress WHERE job_id = ? AND room_name LIKE ? ORDER BY room_name ASC",
+        )
+        .bind(job_id)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rooms)
+    }
+
+    /// Get a single room's progress
+    pub async fn get_room_progress(
+        &self,
+        job_id: &str,
+        room_name: &str,
+    ) -> anyhow::Result<Option<RoomProgress>> {
+        let room = sqlx::query_as::<_, RoomProgress>(
+            "SELECT * FROM room_progress WHERE job_id = ? AND room_name = ?",
+        )
+        .bind(job_id)
+        .bind(room_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(room)
+    }
+
+    /// Get summary stats for a job's rooms
+    pub async fn get_room_progress_summary(&self, job_id: &str) -> anyhow::Result<RoomProgressSummary> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM room_progress WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let complete: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM room_progress WHERE job_id = ? AND is_complete = 1",
+        )
+        .bind(job_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_cabinets: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(cabinet_count), 0) FROM room_progress WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(RoomProgressSummary {
+            total_rooms: total.0,
+            completed_rooms: complete.0,
+            total_cabinets: total_cabinets.0,
+        })
+    }
 }
