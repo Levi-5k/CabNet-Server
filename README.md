@@ -1,6 +1,6 @@
 # CabNet Server
 
-A Rust desktop application for managing barcode scans from Android devices.
+A Rust desktop application for managing barcode scans from an app or Android scanner.
 
 ## Features
 
