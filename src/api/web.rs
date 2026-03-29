@@ -10,26 +10,20 @@ use chrono::{DateTime, Utc};
 
 use super::routes::SharedState;
 
-/// GET / - Route handler that serves landing page on main domain, dashboard on subdomain
+/// GET / - Route handler that serves dashboard on main domain, search page on subdomain
 pub async fn root_handler(
     Host(host): Host,
     State(state): State<SharedState>,
 ) -> Response {
-    // Check if this is a subdomain (e.g., scans.cabnetx.com) or main domain (cabnetx.com)
-    let is_subdomain = host.split('.').count() > 2 
-        || host.starts_with("scans.") 
-        || host.starts_with("api.")
-        || host.contains("localhost")
-        || host.starts_with("192.")
-        || host.starts_with("10.")
-        || host.starts_with("172.");
+    // Check if this is a search subdomain (e.g., scans.cabnetx.com)
+    let is_search_subdomain = host.starts_with("scans.");
     
-    if is_subdomain {
-        // Subdomain or local network - serve dashboard
-        dashboard_inner(&state).await.into_response()
-    } else {
-        // Main domain - serve search page
+    if is_search_subdomain {
+        // scans.* subdomain - serve search page
         search_page().await.into_response()
+    } else {
+        // Main domain, localhost, LAN IPs, other subdomains - serve dashboard
+        dashboard_inner(&state).await.into_response()
     }
 }
 

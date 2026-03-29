@@ -94,15 +94,15 @@ Android Device                    CodeBar Server
 
 The server hosts web pages accessible via browser:
 
-### Ticket Search (`/` on main domain)
-Public-facing search interface at `cabnetx.com`:
+### Ticket Search (`/` on scans subdomain)
+Public-facing search interface at `scans.cabnetx.com`:
 - **Job Dropdown** - Select from all available jobs
 - **Search Input** - Enter ticket number to search
 - **Live Search** - Results filter as you type
 - **Results List** - Shows matching tickets with barcode, timestamp, and status
 
-### Dashboard / Control Center (`/dashboard` or `/` on subdomain)
-Full-featured control center at `scans.cabnetx.com` or local access:
+### Dashboard / Control Center (`/dashboard` or `/` on main domain)
+Full-featured control center at `cabnetx.com` or local access:
 - **Stats Cards** - Device count, scan count, job count, uptime
 - **Jobs Management** - Create, edit, delete jobs
 - **Devices View** - Monitor and manage connected devices
@@ -114,8 +114,8 @@ The server uses host-based routing to serve different pages:
 
 | Host | Page |
 |------|------|
-| `cabnetx.com` | Ticket Search |
-| `scans.cabnetx.com` | Dashboard |
+| `cabnetx.com` | Dashboard |
+| `scans.cabnetx.com` | Ticket Search |
 | `localhost:8080` | Dashboard |
 | `192.168.x.x:8080` | Dashboard |
 

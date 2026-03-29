@@ -67,7 +67,7 @@ Each tab in `src/gui/tabs/` is a struct implementing a `render(&mut self, ui: &m
 The dashboard, search page, email page, and map page in `src/api/web.rs` are **large raw HTML strings** (file is ~5700 lines). They use `Html(r##"..."##)` responses with embedded CSS/JS. No template engine.
 
 ### Host-based routing
-`web::root_handler` inspects the `Host` header to decide between the public search page (main domain like `cabnetx.com`) and the dashboard (subdomains, localhost, or LAN IPs).
+`web::root_handler` inspects the `Host` header to decide between the dashboard (main domain `cabnetx.com`, localhost, LAN IPs) and the public search page (`scans.cabnetx.com` subdomain).
 
 ### Cloudflare Tunnel
 Managed by `src/services/tunnel.rs` which spawns/kills `cloudflared` as a child process. Config persisted at `{data_dir}/tunnel_config.json`.
