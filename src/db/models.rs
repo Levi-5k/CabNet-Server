@@ -382,3 +382,58 @@ pub struct ReportPhotoRecord {
     pub synced_at: Option<String>,
     pub created_at: Option<String>,
 }
+
+// ─── Location Pings ────────────────────────────────────────
+
+/// Location ping input from mobile device
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationPingInput {
+    pub id: String,
+    pub time_entry_id: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: Option<f64>,
+    pub altitude: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading: Option<f64>,
+    pub timestamp: i64,
+    pub battery_level: Option<i32>,
+    pub is_moving: Option<bool>,
+}
+
+/// Location ping record from database
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct LocationPingRecord {
+    pub id: i64,
+    pub uuid: String,
+    pub device_id: String,
+    pub time_entry_id: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: Option<f64>,
+    pub altitude: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading: Option<f64>,
+    pub timestamp: String,
+    pub battery_level: Option<i32>,
+    pub is_moving: bool,
+    pub synced_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Latest position for an active worker
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWorkerPosition {
+    pub device_id: String,
+    pub customer_name: Option<String>,
+    pub job_name: Option<String>,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: Option<f64>,
+    pub speed: Option<f64>,
+    pub is_moving: bool,
+    pub battery_level: Option<i32>,
+    pub timestamp: String,
+    pub clock_in: String,
+    pub is_on_break: bool,
+}

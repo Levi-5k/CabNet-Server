@@ -1913,3 +1913,93 @@ pub async fn upload_report_photo(
         "Photo uploaded".to_string(),
     )))
 }
+
+// ==================== LOCATION PINGS ====================
+
+#[derive(Deserialize)]
+pub struct SyncLocationPingsRequest {
+    pub device_id: String,
+    pub pings: Vec<LocationPingInput>,
+}
+
+#[derive(Serialize)]
+pub struct SyncLocationPingsResponse {
+    pub synced_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GetLocationPingsQuery {
+    pub device_id: Option<String>,
+    pub time_entry_id: Option<String>,
+    pub since: Option<i64>,
+    pub active_only: Option<bool>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct GetLocationPingsResponse {
+    pub pings: Vec<LocationPingRecord>,
+    pub total: usize,
+}
+
+#[derive(Serialize)]
+pub struct LatestPositionsResponse {
+    pub positions: Vec<ActiveWorkerPosition>,
+}
+
+pub async fn sync_location_pings(
+    State(state): State<SharedState>,
+    Json(request): Json<SyncLocationPingsRequest>,
+) -> Result<Json<ApiResponse<SyncLocationPingsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let mut synced_ids = Vec::new();
+
+    for ping in &request.pings {
+        match state.repo.upsert_location_ping(&request.device_id, ping).await {
+            Ok(_) => synced_ids.push(ping.id.clone()),
+            Err(e) => {
+                tracing::warn!("Failed to upsert location ping {}: {}", ping.id, e);
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success(SyncLocationPingsResponse { synced_ids })))
+}
+
+pub async fn get_location_pings(
+    State(state): State<SharedState>,
+    Query(query): Query<GetLocationPingsQuery>,
+) -> Result<Json<ApiResponse<GetLocationPingsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let limit = query.limit.unwrap_or(5000);
+    let active_only = query.active_only.unwrap_or(false);
+
+    let pings = state
+        .repo
+        .get_location_pings(
+            query.device_id.as_deref(),
+            query.time_entry_id.as_deref(),
+            query.since,
+            active_only,
+            limit,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    let total = pings.len();
+    Ok(Json(ApiResponse::success(GetLocationPingsResponse { pings, total })))
+}
+
+pub async fn get_latest_positions(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<LatestPositionsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let positions = state
+        .repo
+        .get_latest_active_positions()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::success(LatestPositionsResponse { positions })))
+}

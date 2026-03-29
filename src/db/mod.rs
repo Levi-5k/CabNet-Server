@@ -445,6 +445,43 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Location pings table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS location_pings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            device_id TEXT NOT NULL,
+            time_entry_id TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            accuracy REAL,
+            altitude REAL,
+            speed REAL,
+            heading REAL,
+            timestamp TEXT NOT NULL,
+            battery_level INTEGER,
+            is_moving INTEGER DEFAULT 0,
+            synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_device_id ON location_pings(device_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_time_entry_id ON location_pings(time_entry_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_timestamp ON location_pings(timestamp)")
+        .execute(pool)
+        .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }

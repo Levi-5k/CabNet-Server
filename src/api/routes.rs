@@ -86,6 +86,10 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/reports", get(handlers::get_reports))
         .route("/api/reports", post(handlers::sync_reports))
         .route("/api/reports/:report_id/photos", post(handlers::upload_report_photo))
+        // Location Pings (GPS tracking)
+        .route("/api/location-pings", post(handlers::sync_location_pings))
+        .route("/api/location-pings", get(handlers::get_location_pings))
+        .route("/api/location-pings/latest", get(handlers::get_latest_positions))
         .with_state(state)
         .layer(RequestDecompressionLayer::new()) // Decompress gzip requests from Android
         .layer(CompressionLayer::new()) // Compress responses with gzip/deflate

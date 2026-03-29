@@ -1829,4 +1829,149 @@ impl Repository {
         .await?;
         Ok(result.map(|(data,)| data))
     }
+
+    // ─── Location Pings ────────────────────────────────────────
+
+    /// Upsert a location ping
+    pub async fn upsert_location_ping(&self, device_id: &str, input: &LocationPingInput) -> anyhow::Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let ts = chrono::DateTime::from_timestamp_millis(input.timestamp)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| now.clone());
+        let is_moving = input.is_moving.unwrap_or(false) as i32;
+
+        let result = sqlx::query(
+            r#"INSERT INTO location_pings (uuid, device_id, time_entry_id, latitude, longitude, accuracy, altitude, speed, heading, timestamp, battery_level, is_moving, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(uuid) DO UPDATE SET
+                   latitude = excluded.latitude,
+                   longitude = excluded.longitude,
+                   accuracy = excluded.accuracy,
+                   altitude = excluded.altitude,
+                   speed = excluded.speed,
+                   heading = excluded.heading,
+                   timestamp = excluded.timestamp,
+                   battery_level = excluded.battery_level,
+                   is_moving = excluded.is_moving,
+                   synced_at = excluded.synced_at"#,
+        )
+        .bind(&input.id)
+        .bind(device_id)
+        .bind(&input.time_entry_id)
+        .bind(input.latitude)
+        .bind(input.longitude)
+        .bind(input.accuracy)
+        .bind(input.altitude)
+        .bind(input.speed)
+        .bind(input.heading)
+        .bind(&ts)
+        .bind(input.battery_level)
+        .bind(is_moving)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get location pings with filters
+    pub async fn get_location_pings(
+        &self,
+        device_id: Option<&str>,
+        time_entry_id: Option<&str>,
+        since: Option<i64>,
+        active_only: bool,
+        limit: i64,
+    ) -> anyhow::Result<Vec<LocationPingRecord>> {
+        let mut sql = String::from(
+            "SELECT id, uuid, device_id, time_entry_id, latitude, longitude, accuracy, altitude, speed, heading, timestamp, battery_level, is_moving, synced_at, created_at FROM location_pings WHERE 1=1"
+        );
+        if device_id.is_some() {
+            sql.push_str(" AND device_id = ?");
+        }
+        if time_entry_id.is_some() {
+            sql.push_str(" AND time_entry_id = ?");
+        }
+        if since.is_some() {
+            sql.push_str(" AND synced_at > ?");
+        }
+        if active_only {
+            sql.push_str(" AND time_entry_id IN (SELECT uuid FROM time_entries WHERE clock_out IS NULL)");
+        }
+        sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+
+        let mut query = sqlx::query_as::<_, LocationPingRecord>(&sql);
+        if let Some(d) = device_id {
+            query = query.bind(d);
+        }
+        if let Some(t) = time_entry_id {
+            query = query.bind(t);
+        }
+        if let Some(s) = since {
+            let ts = chrono::DateTime::from_timestamp_millis(s)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            query = query.bind(ts);
+        }
+        query = query.bind(limit);
+
+        let pings = query.fetch_all(&self.pool).await?;
+        Ok(pings)
+    }
+
+    /// Get the latest location ping for each active worker
+    pub async fn get_latest_active_positions(&self) -> anyhow::Result<Vec<ActiveWorkerPosition>> {
+        // Get latest ping per device for workers currently clocked in
+        let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, f64, f64, Option<f64>, Option<f64>, bool, Option<i32>, String, String, bool)>(
+            r#"SELECT
+                lp.device_id,
+                te.customer_name,
+                te.job_name,
+                lp.latitude,
+                lp.longitude,
+                lp.accuracy,
+                lp.speed,
+                CASE WHEN lp.is_moving THEN 1 ELSE 0 END,
+                lp.battery_level,
+                lp.timestamp,
+                te.clock_in,
+                CASE WHEN te.is_break THEN 1 ELSE 0 END
+            FROM location_pings lp
+            INNER JOIN time_entries te ON lp.time_entry_id = te.uuid
+            WHERE te.clock_out IS NULL
+            AND lp.id = (
+                SELECT lp2.id FROM location_pings lp2
+                WHERE lp2.device_id = lp.device_id
+                ORDER BY lp2.timestamp DESC LIMIT 1
+            )
+            ORDER BY lp.timestamp DESC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let positions = rows.into_iter().map(|r| ActiveWorkerPosition {
+            device_id: r.0,
+            customer_name: r.1,
+            job_name: r.2,
+            latitude: r.3,
+            longitude: r.4,
+            accuracy: r.5,
+            speed: r.6,
+            is_moving: r.7,
+            battery_level: r.8,
+            timestamp: r.9,
+            clock_in: r.10,
+            is_on_break: r.11,
+        }).collect();
+
+        Ok(positions)
+    }
+
+    /// Get total location ping count
+    pub async fn get_location_ping_count(&self) -> anyhow::Result<i64> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM location_pings")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
 }
