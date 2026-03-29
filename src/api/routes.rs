@@ -42,6 +42,7 @@ pub fn create_router(state: SharedState) -> Router {
         // Scans
         .route("/api/scans", get(handlers::get_scans))
         .route("/api/scans", post(handlers::sync_scans))
+        .route("/api/scans/download", get(handlers::download_scans))
         .route("/api/scans/locations", get(handlers::get_scan_locations))
         .route("/api/scans/verify", post(handlers::verify_scans))
         .route("/api/scans/assign", put(handlers::update_scan_assignments))

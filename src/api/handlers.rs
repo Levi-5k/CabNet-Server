@@ -116,6 +116,33 @@ pub struct GetScansResponse {
     pub total: i64,
 }
 
+/// Scan payload formatted for iOS/Android download (matches ServerScan in iOS)
+#[derive(Serialize)]
+pub struct ScanDownloadPayload {
+    pub id: String,
+    pub barcode_data: String,
+    pub barcode_type: Option<String>,
+    pub ticket_number: Option<String>,
+    pub barcode_job_ref: Option<String>,
+    pub job_id: Option<String>,
+    pub device_id: String,
+    pub user_id: Option<String>,
+    pub location: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub scanned_at: i64,
+    pub synced_at: Option<i64>,
+    pub is_printed: bool,
+}
+
+#[derive(Serialize)]
+pub struct ScanDownloadResponse {
+    pub success: bool,
+    pub scans: Vec<ScanDownloadPayload>,
+    pub total: Option<i64>,
+    pub message: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct GetScanLocationsResponse {
     pub locations: Vec<crate::db::models::ScanLocation>,
@@ -472,7 +499,7 @@ pub async fn verify_scans(
     })))
 }
 
-/// GET /api/scans - Get all scans with optional filtering
+/// GET /api/scans - Get all scans with optional filtering (web dashboard format)
 pub async fn get_scans(
     State(state): State<SharedState>,
     Query(query): Query<GetScansQuery>,
@@ -494,6 +521,72 @@ pub async fn get_scans(
     let total = state.repo.get_scan_count().await.unwrap_or(0);
 
     Ok(Json(ApiResponse::success(GetScansResponse { scans, total })))
+}
+
+/// GET /api/scans/download - Download scans in iOS/Android-compatible format
+pub async fn download_scans(
+    State(state): State<SharedState>,
+    Query(query): Query<GetScansQuery>,
+) -> Result<Json<ScanDownloadResponse>, (StatusCode, Json<ScanDownloadResponse>)> {
+    let state = state.read().await;
+    let limit = query.limit.unwrap_or(5000);
+
+    let scans = state
+        .repo
+        .get_scans(query.job_id, query.device_id.as_deref(), query.since, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScanDownloadResponse {
+                    success: false,
+                    scans: vec![],
+                    total: None,
+                    message: Some(e.to_string()),
+                }),
+            )
+        })?;
+
+    let total = state.repo.get_scan_count().await.unwrap_or(0);
+
+    // Build a cache of job_id -> job_uuid
+    let mut job_uuid_cache: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for scan in &scans {
+        if let Some(jid) = scan.job_id {
+            if !job_uuid_cache.contains_key(&jid) {
+                if let Ok(Some(job)) = state.repo.get_job(jid).await {
+                    job_uuid_cache.insert(jid, job.uuid);
+                }
+            }
+        }
+    }
+
+    let payloads: Vec<ScanDownloadPayload> = scans
+        .into_iter()
+        .map(|s| ScanDownloadPayload {
+            id: s.uuid,
+            barcode_data: s.barcode,
+            barcode_type: s.barcode_type,
+            ticket_number: s.ticket_number,
+            barcode_job_ref: s.barcode_job_ref,
+            job_id: s.job_id.and_then(|jid| job_uuid_cache.get(&jid).cloned()),
+            device_id: s.device_id,
+            user_id: s.user_id,
+            location: s.location,
+            latitude: s.latitude,
+            longitude: s.longitude,
+            scanned_at: rfc3339_to_millis(&s.scanned_at),
+            synced_at: Some(rfc3339_to_millis(&s.synced_at)),
+            is_printed: s.is_printed != 0,
+        })
+        .collect();
+
+    Ok(Json(ScanDownloadResponse {
+        success: true,
+        scans: payloads,
+        total: Some(total),
+        message: None,
+    }))
 }
 
 /// GET /api/scans/locations - Get scans with GPS coordinates for map display
