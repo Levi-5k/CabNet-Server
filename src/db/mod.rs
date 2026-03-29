@@ -489,6 +489,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT UNIQUE NOT NULL,
             display_name TEXT NOT NULL,
+            phone_number TEXT,
             role TEXT DEFAULT 'worker',
             is_admin INTEGER DEFAULT 0,
             avatar_color TEXT,
@@ -499,6 +500,11 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Add phone_number column if it doesn't exist (migration for existing DBs)
+    let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN phone_number TEXT")
+        .execute(pool)
+        .await;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_team_members_device_id ON team_members(device_id)")
         .execute(pool)

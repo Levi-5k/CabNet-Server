@@ -446,6 +446,7 @@ pub struct TeamMember {
     pub id: i64,
     pub device_id: String,
     pub display_name: String,
+    pub phone_number: Option<String>,
     pub role: String,
     pub is_admin: i32,
     pub avatar_color: Option<String>,
@@ -458,6 +459,7 @@ pub struct TeamMember {
 pub struct TeamMemberInput {
     pub device_id: String,
     pub display_name: String,
+    pub phone_number: Option<String>,
     pub role: Option<String>,
     pub is_admin: Option<bool>,
     pub avatar_color: Option<String>,
@@ -468,6 +470,7 @@ pub struct TeamMemberInput {
 pub struct TeamMemberStatus {
     pub device_id: String,
     pub display_name: String,
+    pub phone_number: Option<String>,
     pub role: String,
     pub is_admin: bool,
     pub avatar_color: Option<String>,

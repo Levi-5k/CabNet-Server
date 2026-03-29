@@ -343,6 +343,10 @@ pub struct ConnectRequest {
     pub os_version: Option<String>,
     #[serde(default)]
     pub app_version: Option<String>,
+    #[serde(default)]
+    pub user_name: Option<String>,
+    #[serde(default)]
+    pub phone_number: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1093,8 +1097,8 @@ pub async fn device_connect(
 
     // Create DeviceInput from ConnectRequest
     let device_input = DeviceInput {
-        device_id: request.device_id,
-        device_name: request.device_name,
+        device_id: request.device_id.clone(),
+        device_name: request.device_name.clone(),
         model: request.model,
         os_version: request.os_version,
         app_version: request.app_version,
@@ -1110,6 +1114,23 @@ pub async fn device_connect(
             Json(ApiResponse::error(e.to_string())),
         )
     })?;
+
+    // Auto-register as team member if user_name is provided
+    if let Some(ref user_name) = request.user_name {
+        if !user_name.trim().is_empty() {
+            let team_input = crate::db::models::TeamMemberInput {
+                device_id: request.device_id.clone(),
+                display_name: user_name.trim().to_string(),
+                phone_number: request.phone_number.clone(),
+                role: None,
+                is_admin: None,
+                avatar_color: None,
+            };
+            if let Err(e) = state.repo.upsert_team_member(&team_input).await {
+                tracing::warn!("Failed to auto-register team member: {}", e);
+            }
+        }
+    }
 
     // Update heartbeat for the newly connected device
     state.repo.update_device_heartbeat(&device_id).await.map_err(|e| {
@@ -2247,4 +2268,50 @@ pub async fn get_room_detail(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
 
     Ok(Json(ApiResponse::success(room)))
+}
+
+// ==================== ROOM ITEMS CONFIG ====================
+
+const DEFAULT_ROOM_ITEMS: &[&str] = &["fillers", "handles", "fast_caps", "set_boxes", "caulking"];
+const ROOM_ITEMS_SETTING_KEY: &str = "room_items";
+
+/// GET /api/settings/room-items - Get the list of room completion items
+pub async fn get_room_items(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<Vec<String>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let items = match state.repo.get_setting(ROOM_ITEMS_SETTING_KEY).await {
+        Ok(Some(json_str)) => {
+            serde_json::from_str::<Vec<String>>(&json_str)
+                .unwrap_or_else(|_| DEFAULT_ROOM_ITEMS.iter().map(|s| s.to_string()).collect())
+        }
+        _ => DEFAULT_ROOM_ITEMS.iter().map(|s| s.to_string()).collect(),
+    };
+
+    Ok(Json(ApiResponse::success(items)))
+}
+
+/// PUT /api/settings/room-items - Update the list of room completion items (admin)
+pub async fn set_room_items(
+    State(state): State<SharedState>,
+    Json(items): Json<Vec<String>>,
+) -> Result<Json<ApiResponse<Vec<String>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    // Filter out empty strings
+    let items: Vec<String> = items.into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let json_str = serde_json::to_string(&items)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    state.repo.set_setting(ROOM_ITEMS_SETTING_KEY, &json_str).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    tracing::info!("Room items updated: {:?}", items);
+
+    Ok(Json(ApiResponse::success(items)))
 }

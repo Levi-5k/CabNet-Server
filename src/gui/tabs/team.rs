@@ -254,6 +254,7 @@ impl TeamTab {
                                 let input = TeamMemberInput {
                                     device_id: self.new_member_device.clone(),
                                     display_name: self.new_member_name.clone(),
+                                    phone_number: None,
                                     role: Some(self.new_member_role.clone()),
                                     is_admin: Some(self.new_member_admin),
                                     avatar_color: None,

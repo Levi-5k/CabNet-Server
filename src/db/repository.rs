@@ -1984,10 +1984,11 @@ impl Repository {
         let is_admin = input.is_admin.unwrap_or(false) as i32;
 
         let result = sqlx::query(
-            r#"INSERT INTO team_members (device_id, display_name, role, is_admin, avatar_color, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            r#"INSERT INTO team_members (device_id, display_name, phone_number, role, is_admin, avatar_color, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 display_name = excluded.display_name,
+                phone_number = COALESCE(excluded.phone_number, team_members.phone_number),
                 role = excluded.role,
                 is_admin = excluded.is_admin,
                 avatar_color = COALESCE(excluded.avatar_color, team_members.avatar_color),
@@ -1995,6 +1996,7 @@ impl Repository {
         )
         .bind(&input.device_id)
         .bind(&input.display_name)
+        .bind(&input.phone_number)
         .bind(&role)
         .bind(is_admin)
         .bind(&input.avatar_color)
@@ -2069,6 +2071,7 @@ impl Repository {
             statuses.push(TeamMemberStatus {
                 device_id: member.device_id.clone(),
                 display_name: member.display_name.clone(),
+                phone_number: member.phone_number.clone(),
                 role: member.role.clone(),
                 is_admin: member.is_admin != 0,
                 avatar_color: member.avatar_color.clone(),
