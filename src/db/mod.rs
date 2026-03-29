@@ -1,0 +1,353 @@
+pub mod models;
+pub mod repository;
+
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::path::Path;
+
+/// Initialize the database connection pool and run migrations
+pub async fn init_pool(database_path: &Path) -> anyhow::Result<SqlitePool> {
+    // Ensure the data directory exists
+    if let Some(parent) = database_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+
+    // Run migrations
+    run_migrations(&pool).await?;
+
+    Ok(pool)
+}
+
+/// Run database migrations to create tables
+async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            barcode TEXT NOT NULL,
+            barcode_type TEXT,
+            ticket_number TEXT,
+            barcode_job_ref TEXT,
+            job_id INTEGER,
+            device_id TEXT NOT NULL,
+            user_id TEXT,
+            location TEXT,
+            latitude REAL,
+            longitude REAL,
+            scanned_at TEXT NOT NULL,
+            synced_at TEXT NOT NULL,
+            is_printed INTEGER DEFAULT 0,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            
+            FOREIGN KEY (job_id) REFERENCES jobs(id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            reference_number TEXT,
+            customer_name TEXT,
+            expected_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'PENDING',
+            device_id TEXT,
+            created_by TEXT,
+            notes TEXT,
+            priority TEXT DEFAULT 'NORMAL',
+            due_date TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            started_at TEXT,
+            completed_at TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT UNIQUE NOT NULL,
+            device_name TEXT,
+            model TEXT,
+            os_version TEXT,
+            app_version TEXT,
+            last_seen_at TEXT,
+            registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            -- Security fields
+            registration_code TEXT, -- Admin-generated code for device approval
+            is_approved INTEGER DEFAULT 0, -- Requires admin approval
+            auth_token TEXT, -- Device authentication token
+            auth_token_expires_at TEXT, -- Token expiration
+            fingerprint_hash TEXT, -- Device fingerprint for impersonation detection
+            registration_attempts INTEGER DEFAULT 0, -- Rate limiting
+            last_registration_attempt_at TEXT, -- Rate limiting
+            blocked_until TEXT, -- Temporary blocking for abuse
+            ip_address TEXT, -- Registration IP for security tracking
+            user_agent TEXT, -- Device user agent
+            -- Enhanced status tracking
+            status TEXT DEFAULT 'pending_approval',
+            last_heartbeat_at TEXT,
+            connection_count INTEGER DEFAULT 0,
+            total_uptime_seconds INTEGER DEFAULT 0,
+            error_count INTEGER DEFAULT 0,
+            last_error_at TEXT,
+            last_error_message TEXT,
+            -- Latest heartbeat data
+            battery_level INTEGER,
+            is_charging INTEGER,
+            available_memory_mb INTEGER,
+            total_memory_mb INTEGER,
+            network_type TEXT,
+            connection_quality TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS email_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            smtp_host TEXT,
+            smtp_port INTEGER DEFAULT 587,
+            smtp_username TEXT,
+            smtp_password TEXT,
+            email_from TEXT,
+            email_to TEXT,
+            email_subject_template TEXT DEFAULT 'Cabinet Scan Report - {date}',
+            auto_send_enabled INTEGER DEFAULT 0,
+            auto_send_delay_minutes INTEGER DEFAULT 30,
+            last_auto_send_at TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS email_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sent_at TEXT NOT NULL,
+            recipients TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            scan_count INTEGER,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Web clients table (for dashboard trust system)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS web_clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id TEXT UNIQUE NOT NULL,
+            client_name TEXT,
+            user_agent TEXT,
+            ip_address TEXT,
+            is_trusted INTEGER DEFAULT 0,
+            last_seen_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Pending changes table (for approval workflow)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pending_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            change_data TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            
+            FOREIGN KEY (client_id) REFERENCES web_clients(client_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Create indexes
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_job_id ON scans(job_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_device_id ON scans(device_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_scanned_at ON scans(scanned_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_barcode ON scans(barcode)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_pending_changes_status ON pending_changes(status)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_web_clients_client_id ON web_clients(client_id)")
+        .execute(pool)
+        .await?;
+
+    // Migration: Add local_id column to scans table for Android sync tracking
+    // This column stores the local Room database ID from the Android device
+    let _ = sqlx::query("ALTER TABLE scans ADD COLUMN local_id INTEGER")
+        .execute(pool)
+        .await;
+
+    // Create index on local_id for faster sync lookups
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scans_local_id ON scans(local_id)")
+        .execute(pool)
+        .await?;
+
+    // Unique index on (local_id, device_id) to prevent duplicate scans from retried syncs
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_local_device ON scans(local_id, device_id) WHERE local_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .ok(); // ok() because it may fail if duplicates already exist — we clean those up next
+
+    // Clean up existing duplicate scans: keep only the newest row per (local_id, device_id)
+    let cleaned = sqlx::query(
+        r#"DELETE FROM scans WHERE id NOT IN (
+            SELECT MAX(id) FROM scans WHERE local_id IS NOT NULL GROUP BY local_id, device_id
+        ) AND local_id IS NOT NULL"#
+    )
+    .execute(pool)
+    .await;
+    if let Ok(result) = &cleaned {
+        if result.rows_affected() > 0 {
+            tracing::info!("Cleaned up {} duplicate scans", result.rows_affected());
+        }
+    }
+
+    // Now create the unique index if it didn't exist yet (after cleanup)
+    let _ = sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_local_device ON scans(local_id, device_id) WHERE local_id IS NOT NULL")
+        .execute(pool)
+        .await;
+
+    // Insert default email config if not exists
+    sqlx::query("INSERT OR IGNORE INTO email_config (id) VALUES (1)")
+        .execute(pool)
+        .await?;
+
+    // Insert default settings
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO settings (key, value) VALUES 
+        ('server_port', '8080'),
+        ('server_host', '0.0.0.0'),
+        ('auto_backup_enabled', 'true')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Migration: Add enhanced device status fields
+    // Temporarily disabled for testing
+    /*
+    // Check if columns exist before adding them (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN status TEXT DEFAULT 'offline'")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_heartbeat_at TEXT")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN connection_count INTEGER DEFAULT 0")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN total_uptime_seconds INTEGER DEFAULT 0")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN error_count INTEGER DEFAULT 0")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_error_at TEXT")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_error_message TEXT")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+
+    // Add heartbeat data columns
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN battery_level INTEGER")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN is_charging INTEGER") // SQLite stores booleans as integers
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN available_memory_mb INTEGER")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN total_memory_mb INTEGER")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN network_type TEXT")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN connection_quality TEXT")
+        .execute(pool)
+        .await; // Ignore error if column already exists
+
+    // Create indexes for the new device status fields (these will be ignored if they already exist)
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_last_heartbeat ON devices(last_heartbeat_at)")
+        .execute(pool)
+        .await;
+    */
+
+    tracing::info!("Database migrations completed");
+    Ok(())
+}

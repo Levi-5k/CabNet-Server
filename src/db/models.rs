@@ -1,0 +1,283 @@
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+
+/// Scan record from barcode scanner
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Scan {
+    pub id: i64,
+    pub uuid: String,
+    pub barcode: String,
+    pub barcode_type: Option<String>,
+    pub ticket_number: Option<String>,
+    pub barcode_job_ref: Option<String>,
+    pub job_id: Option<i64>,
+    pub device_id: String,
+    pub user_id: Option<String>,
+    pub location: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub scanned_at: String,
+    pub synced_at: String,
+    pub is_printed: i32,
+    pub notes: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Scan data received from Android API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanInput {
+    pub id: String,
+    pub barcode_data: String,
+    pub barcode_type: Option<String>,
+    pub ticket_number: Option<String>,
+    pub barcode_job_ref: Option<String>,
+    pub job_id: Option<String>,
+    pub device_id: String,
+    pub user_id: Option<String>,
+    pub location: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub scanned_at: i64,
+    pub is_printed: Option<bool>,
+    /// Local ID from Android device - used for sync confirmation
+    pub local_id: Option<i64>,
+}
+
+/// Job record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Job {
+    pub id: i64,
+    pub uuid: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub reference_number: Option<String>,
+    pub customer_name: Option<String>,
+    pub expected_count: i32,
+    pub status: String,
+    pub device_id: Option<String>,
+    pub created_by: Option<String>,
+    pub notes: Option<String>,
+    pub priority: String,
+    pub due_date: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+/// Job data received from Android API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInput {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub reference_number: Option<String>,
+    pub customer_name: Option<String>,
+    pub expected_count: Option<i32>,
+    pub scan_count: Option<i32>,
+    pub status: Option<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub device_id: Option<String>,
+    pub created_by: Option<String>,
+    pub notes: Option<String>,
+    pub priority: Option<String>,
+    pub due_date: Option<i64>,
+}
+
+/// Device record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Device {
+    pub id: i64,
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub model: Option<String>,
+    pub os_version: Option<String>,
+    pub app_version: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub registered_at: Option<String>,
+    pub is_active: i32,
+    // Security fields
+    pub registration_code: Option<String>,
+    pub is_approved: i32,
+    pub auth_token: Option<String>,
+    pub auth_token_expires_at: Option<String>,
+    pub fingerprint_hash: Option<String>,
+    pub registration_attempts: i32,
+    pub last_registration_attempt_at: Option<String>,
+    pub blocked_until: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    // Enhanced status tracking
+    pub status: Option<String>,
+    pub last_heartbeat_at: Option<String>,
+    pub connection_count: Option<i64>,
+    pub total_uptime_seconds: Option<i64>,
+    pub error_count: Option<i64>,
+    pub last_error_at: Option<String>,
+    pub last_error_message: Option<String>,
+    // Latest heartbeat data
+    pub battery_level: Option<i32>,
+    pub is_charging: Option<bool>,
+    pub available_memory_mb: Option<i32>,
+    pub total_memory_mb: Option<i32>,
+    pub network_type: Option<String>,
+    pub connection_quality: Option<String>,
+}
+
+/// Device registration input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInput {
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub model: Option<String>,
+    pub os_version: Option<String>,
+    pub app_version: Option<String>,
+    // Security fields
+    pub registration_code: Option<String>,
+    pub fingerprint: Option<String>, // Device fingerprint for security
+    pub user_agent: Option<String>,
+}
+
+/// Device registration approval request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceApprovalRequest {
+    pub device_id: String,
+    pub approved: bool,
+    pub notes: Option<String>,
+}
+
+/// Registration code information
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RegistrationCodeInfo {
+    pub code: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub used_by: Option<String>,
+    pub used_at: Option<String>,
+}
+
+/// Device authentication request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthRequest {
+    pub device_id: String,
+    pub auth_token: String,
+}
+
+/// Security settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecuritySettings {
+    pub max_registration_attempts_per_device: u32,
+    pub max_registration_attempts_per_ip: u32,
+    pub rate_limit_window_minutes: u32,
+    pub block_duration_minutes: i64,
+    pub token_expiry_hours: u32,
+    pub require_registration_code: bool,
+}
+
+/// Email configuration
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct EmailConfigRecord {
+    pub id: i64,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i32>,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub email_from: Option<String>,
+    pub email_to: Option<String>,
+    pub email_subject_template: Option<String>,
+    pub auto_send_enabled: i32,
+    pub auto_send_delay_minutes: i32,
+    pub last_auto_send_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Email history record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct EmailHistory {
+    pub id: i64,
+    pub sent_at: String,
+    pub recipients: String,
+    pub subject: String,
+    pub scan_count: Option<i32>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Setting key-value pair
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Setting {
+    pub key: String,
+    pub value: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Job with scan count for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobWithCount {
+    #[serde(flatten)]
+    pub job: Job,
+    pub scan_count: i32,
+}
+
+/// Device with statistics for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceWithStats {
+    #[serde(flatten)]
+    pub device: Device,
+    pub total_scans: i32,
+    pub is_online: bool,
+}
+
+/// Scan with location for map display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanLocation {
+    pub id: i64,
+    pub uuid: String,
+    pub barcode: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub scanned_at: String,
+    pub device_id: String,
+    pub job_name: Option<String>,
+}
+
+/// Web client for dashboard trust system
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WebClient {
+    pub id: i64,
+    pub client_id: String,
+    pub client_name: Option<String>,
+    pub user_agent: Option<String>,
+    pub ip_address: Option<String>,
+    pub is_trusted: i32,
+    pub last_seen_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Pending change awaiting approval
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PendingChange {
+    pub id: i64,
+    pub client_id: String,
+    pub change_type: String,
+    pub entity_type: String,
+    pub entity_id: Option<String>,
+    pub change_data: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+}
+
+/// Input for creating a pending change
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingChangeInput {
+    pub change_type: String,
+    pub entity_type: String,
+    pub entity_id: Option<String>,
+    pub change_data: serde_json::Value,
+}

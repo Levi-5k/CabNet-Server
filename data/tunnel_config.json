@@ -1,0 +1,6 @@
+{
+  "tunnel_name": "cabnet",
+  "domain": "cabnetx.com",
+  "subdomain": "scans",
+  "enabled": true
+}
