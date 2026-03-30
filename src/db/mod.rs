@@ -293,60 +293,62 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Migration: Add security fields to devices table
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN registration_code TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN is_approved INTEGER DEFAULT 0")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN auth_token TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN auth_token_expires_at TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN fingerprint_hash TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN registration_attempts INTEGER DEFAULT 0")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_registration_attempt_at TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN blocked_until TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN ip_address TEXT")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN user_agent TEXT")
+        .execute(pool).await;
+
     // Migration: Add enhanced device status fields
-    // Temporarily disabled for testing
-    /*
-    // Check if columns exist before adding them (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN status TEXT DEFAULT 'offline'")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_heartbeat_at TEXT")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN connection_count INTEGER DEFAULT 0")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN total_uptime_seconds INTEGER DEFAULT 0")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN error_count INTEGER DEFAULT 0")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_error_at TEXT")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_error_message TEXT")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
 
-    // Add heartbeat data columns
+    // Migration: Add heartbeat data columns
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN battery_level INTEGER")
-        .execute(pool)
-        .await; // Ignore error if column already exists
-    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN is_charging INTEGER") // SQLite stores booleans as integers
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN is_charging INTEGER")
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN available_memory_mb INTEGER")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN total_memory_mb INTEGER")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN network_type TEXT")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN connection_quality TEXT")
-        .execute(pool)
-        .await; // Ignore error if column already exists
+        .execute(pool).await;
 
-    // Create indexes for the new device status fields (these will be ignored if they already exist)
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
-        .execute(pool)
-        .await;
+        .execute(pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_devices_last_heartbeat ON devices(last_heartbeat_at)")
-        .execute(pool)
-        .await;
-    */
+        .execute(pool).await;
 
     // Time entries table
     sqlx::query(
