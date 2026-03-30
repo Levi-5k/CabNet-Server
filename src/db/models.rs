@@ -575,3 +575,17 @@ pub struct JobFileSearchResult {
     pub job_id: String,
     pub snippet: String,
 }
+
+/// Lading ticket parsed from shipping/packing PDF
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct LadingTicket {
+    pub id: i64,
+    pub job_id: String,
+    pub job_file_uuid: String,
+    pub ticket_number: String,
+    pub description: Option<String>,
+    pub room: Option<String>,
+    pub qty: i32,
+    pub section: Option<String>,
+    pub created_at: Option<String>,
+}

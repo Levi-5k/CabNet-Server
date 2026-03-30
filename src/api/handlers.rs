@@ -2498,6 +2498,19 @@ pub async fn upload_job_file(
 
     tracing::info!("File uploaded for job {}: {} ({} bytes, {} chars extracted)", job_id, file_name, file_size, extracted_text.as_ref().map(|t| t.len()).unwrap_or(0));
 
+    // If this is a lading/shipping/packing PDF, parse ticket data
+    let lower_name = file_name.to_lowercase();
+    if lower_name.contains("lading") || lower_name.contains("shipping") || lower_name.contains("packing") || lower_name.contains("bol") {
+        if let Some(ref text) = extracted_text {
+            let tickets = parse_lading_tickets(text, &job_id, &uuid);
+            if !tickets.is_empty() {
+                let count = tickets.len();
+                let _ = state.repo.insert_lading_tickets(&tickets).await;
+                tracing::info!("Parsed {} lading tickets from {}", count, file_name);
+            }
+        }
+    }
+
     Ok(Json(ApiResponse::success(crate::db::models::JobFileMeta {
         uuid,
         job_id,
@@ -2631,4 +2644,133 @@ fn extract_pdf_text(data: &[u8]) -> Option<String> {
     }
 
     if texts.is_empty() { None } else { Some(texts.join(" ")) }
+}
+
+/// Parse lading/shipping PDF text into ticket records
+/// Returns tuples of (job_id, file_uuid, ticket_number, description, room, qty, section)
+fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
+    let mut tickets = Vec::new();
+    let mut current_section: Option<String> = None;
+
+    for line in text.split('\n') {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        // Detect section headers like "HARDWARE TICKETS"
+        let upper = line.to_uppercase();
+        if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING") {
+            current_section = Some(line.to_string());
+            continue;
+        }
+
+        // Skip header lines
+        if upper.contains("PRIORITY") && upper.contains("TICKET") { continue; }
+        if upper.contains("REPORT REF") || upper.contains("RUN DATE") { continue; }
+
+        // Try to parse ticket lines: "000115 SS Counter Top 103 1"
+        // Pattern: ticket_number (digits, 3-8 chars) followed by description, room, qty
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() { continue; }
+
+        // First token should be a ticket number (all digits, 3-8 chars)
+        let first = parts[0];
+        if first.len() < 3 || first.len() > 8 || !first.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        // Skip if it looks like "Multi-Ticketed" or header marker
+        if parts.len() > 1 && parts[1].starts_with('*') {
+            // Handle multi-ticket grouping - skip header row
+            continue;
+        }
+
+        // Parse remaining tokens. Last token might be qty (integer), second-to-last might be room
+        if parts.len() < 2 { continue; }
+
+        let ticket_number = first.to_string();
+
+        // Try to find qty at the end (last token that's a small integer)
+        let mut qty: i32 = 1;
+        let mut end_idx = parts.len();
+        if let Ok(q) = parts[parts.len() - 1].parse::<i32>() {
+            if q >= 0 && q < 10000 {
+                qty = q;
+                end_idx -= 1;
+            }
+        }
+
+        // Try to find room number (number or short alphanumeric before qty)
+        let mut room: Option<String> = None;
+        if end_idx > 1 {
+            let potential_room = parts[end_idx - 1];
+            // Room numbers are typically 3-digit numbers or short names like "SINKS"
+            let is_room = potential_room.len() <= 10
+                && (potential_room.chars().all(|c| c.is_ascii_digit())
+                    || potential_room.chars().all(|c| c.is_ascii_alphanumeric()));
+            // But not if it's clearly part of the description (contains dots/dashes typical of part numbers)
+            let is_part_number = potential_room.contains('.') || potential_room.contains('-');
+            if is_room && !is_part_number && end_idx > 2 {
+                room = Some(potential_room.to_string());
+                end_idx -= 1;
+            }
+        }
+
+        // Everything between ticket number and room/qty is description
+        let desc_parts: Vec<&str> = parts[1..end_idx].to_vec();
+        let description = if desc_parts.is_empty() {
+            None
+        } else {
+            Some(desc_parts.join(" "))
+        };
+
+        // Skip if "See inside" or similar non-item descriptions
+        if let Some(ref d) = description {
+            if d.to_lowercase().contains("see inside") { continue; }
+        }
+
+        tickets.push((
+            job_id.to_string(),
+            file_uuid.to_string(),
+            ticket_number,
+            description,
+            room,
+            qty,
+            current_section.clone(),
+        ));
+    }
+
+    tickets
+}
+
+/// GET /api/jobs/:job_id/lading-tickets - List all lading tickets for a job
+pub async fn get_lading_tickets(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<ApiResponse<LadingTicketsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let tickets = state.repo.get_lading_tickets_for_job(&job_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(LadingTicketsResponse { tickets })))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LadingTicketsResponse {
+    pub tickets: Vec<crate::db::models::LadingTicket>,
+}
+
+/// GET /api/lading-tickets/:ticket_number - Get description for a ticket number
+pub async fn get_ticket_description(
+    State(state): State<SharedState>,
+    Path(ticket_number): Path<String>,
+    Query(params): Query<TicketDescriptionQuery>,
+) -> Result<Json<ApiResponse<Option<crate::db::models::LadingTicket>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let ticket = state.repo.get_lading_ticket_description(&ticket_number, params.job_id.as_deref()).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(ticket)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TicketDescriptionQuery {
+    pub job_id: Option<String>,
 }

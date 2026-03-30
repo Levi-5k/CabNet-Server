@@ -2508,6 +2508,68 @@ impl Repository {
             super::models::JobFileSearchResult { file_uuid: uuid, file_name, job_id, snippet }
         }).collect())
     }
+
+    // MARK: - Lading Tickets
+
+    pub async fn insert_lading_tickets(&self, tickets: &[(String, String, String, Option<String>, Option<String>, i32, Option<String>)]) -> anyhow::Result<usize> {
+        // Each tuple: (job_id, job_file_uuid, ticket_number, description, room, qty, section)
+        let mut count = 0;
+        for (job_id, file_uuid, ticket, desc, room, qty, section) in tickets {
+            sqlx::query(
+                r#"INSERT INTO lading_tickets (job_id, job_file_uuid, ticket_number, description, room, qty, section)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(job_id)
+            .bind(file_uuid)
+            .bind(ticket)
+            .bind(desc.as_deref())
+            .bind(room.as_deref())
+            .bind(*qty)
+            .bind(section.as_deref())
+            .execute(&self.pool)
+            .await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn get_lading_tickets_for_job(&self, job_id: &str) -> anyhow::Result<Vec<super::models::LadingTicket>> {
+        let tickets = sqlx::query_as::<_, super::models::LadingTicket>(
+            "SELECT * FROM lading_tickets WHERE job_id = ? ORDER BY ticket_number"
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(tickets)
+    }
+
+    pub async fn get_lading_ticket_description(&self, ticket_number: &str, job_id: Option<&str>) -> anyhow::Result<Option<super::models::LadingTicket>> {
+        let ticket = if let Some(jid) = job_id {
+            sqlx::query_as::<_, super::models::LadingTicket>(
+                "SELECT * FROM lading_tickets WHERE ticket_number = ? AND job_id = ? LIMIT 1"
+            )
+            .bind(ticket_number)
+            .bind(jid)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, super::models::LadingTicket>(
+                "SELECT * FROM lading_tickets WHERE ticket_number = ? ORDER BY created_at DESC LIMIT 1"
+            )
+            .bind(ticket_number)
+            .fetch_optional(&self.pool)
+            .await?
+        };
+        Ok(ticket)
+    }
+
+    pub async fn delete_lading_tickets_for_file(&self, job_file_uuid: &str) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM lading_tickets WHERE job_file_uuid = ?")
+            .bind(job_file_uuid)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 /// Round a DateTime to the nearest N minutes

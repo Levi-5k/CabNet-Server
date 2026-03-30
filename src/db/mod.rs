@@ -571,6 +571,35 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Lading tickets table (parsed from shipping/packing PDFs)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS lading_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            job_file_uuid TEXT NOT NULL,
+            ticket_number TEXT NOT NULL,
+            description TEXT,
+            room TEXT,
+            qty INTEGER DEFAULT 1,
+            section TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lading_tickets_job_id ON lading_tickets(job_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lading_tickets_ticket ON lading_tickets(ticket_number)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lading_tickets_file ON lading_tickets(job_file_uuid)")
+        .execute(pool)
+        .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }

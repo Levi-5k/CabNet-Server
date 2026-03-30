@@ -113,6 +113,9 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/jobs/:job_id/files", post(handlers::upload_job_file))
         .route("/api/jobs/:job_id/files/:file_uuid", get(handlers::download_job_file))
         .route("/api/jobs/:job_id/files/:file_uuid", delete(handlers::delete_job_file))
+        // Lading Tickets (parsed from shipping PDFs)
+        .route("/api/jobs/:job_id/lading-tickets", get(handlers::get_lading_tickets))
+        .route("/api/lading-tickets/:ticket_number", get(handlers::get_ticket_description))
         .with_state(state)
         .layer(RequestDecompressionLayer::new()) // Decompress gzip requests from Android
         .layer(CompressionLayer::new()) // Compress responses with gzip/deflate
