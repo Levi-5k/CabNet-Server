@@ -628,10 +628,7 @@ impl Repository {
     /// Get all devices with enhanced status information
     pub async fn get_devices_with_status(&self) -> anyhow::Result<Vec<Device>> {
         Ok(sqlx::query_as::<_, Device>(
-            r#"SELECT id, device_id, device_name, model, os_version, app_version, 
-                      last_seen_at, registered_at, is_active, status, last_heartbeat_at,
-                      connection_count, total_uptime_seconds, error_count, last_error_at, last_error_message
-               FROM devices ORDER BY last_seen_at DESC NULLS LAST"#,
+            r#"SELECT * FROM devices ORDER BY last_seen_at DESC NULLS LAST"#,
         )
         .fetch_all(&self.pool)
         .await?)
@@ -643,10 +640,7 @@ impl Repository {
         
         // First, get current device status
         let device: Option<Device> = sqlx::query_as::<_, Device>(
-            r#"SELECT id, device_id, device_name, model, os_version, app_version, 
-                      last_seen_at, registered_at, is_active, status, last_heartbeat_at,
-                      connection_count, total_uptime_seconds, error_count, last_error_at, last_error_message
-               FROM devices WHERE device_id = ?"#,
+            r#"SELECT * FROM devices WHERE device_id = ?"#,
         )
         .bind(device_id)
         .fetch_optional(&self.pool)
@@ -1536,13 +1530,7 @@ impl Repository {
     /// Get a single device by ID
     pub async fn get_device(&self, device_id: &str) -> anyhow::Result<Option<Device>> {
         Ok(sqlx::query_as::<_, Device>(
-            r#"SELECT id, device_id, device_name, model, os_version, app_version, 
-                      last_seen_at, registered_at, is_active, status, last_heartbeat_at,
-                      connection_count, total_uptime_seconds, error_count, last_error_at, last_error_message,
-                      registration_code, is_approved, auth_token, auth_token_expires_at, fingerprint_hash,
-                      registration_attempts, last_registration_attempt_at, blocked_until, ip_address, user_agent,
-                      battery_level, is_charging, available_memory_mb, total_memory_mb, network_type, connection_quality
-               FROM devices WHERE device_id = ?"#,
+            r#"SELECT * FROM devices WHERE device_id = ?"#,
         )
         .bind(device_id)
         .fetch_optional(&self.pool)
