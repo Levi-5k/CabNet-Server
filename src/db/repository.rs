@@ -2059,21 +2059,22 @@ impl Repository {
         // Get all registered team members
         let members = self.get_team_members().await?;
 
-        // Get active time entries (currently clocked in)
-        let active_entries = self.get_active_time_entries().await?;
+        // Get all active time entries (work + breaks with no clock_out)
+        let active_work = self.get_active_time_entries().await?;
+        let active_breaks = self.get_active_breaks().await?;
 
         // Get today's date for scan counts
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let mut statuses = Vec::new();
         for member in &members {
-            // Find active time entry for this device
-            let active_work = active_entries.iter().find(|e| e.device_id == member.device_id && e.is_break == 0);
-            let active_break = active_entries.iter().find(|e| e.device_id == member.device_id && e.is_break == 1);
+            // Find active entries for this device
+            let on_break = active_breaks.iter().find(|e| e.device_id == member.device_id);
+            let working = active_work.iter().find(|e| e.device_id == member.device_id);
 
-            let (status, current_job, clock_in) = if let Some(entry) = active_break {
+            let (status, current_job, clock_in) = if let Some(entry) = on_break {
                 ("break".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
-            } else if let Some(entry) = active_work {
+            } else if let Some(entry) = working {
                 ("working".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
             } else {
                 ("offline".to_string(), None, None)
