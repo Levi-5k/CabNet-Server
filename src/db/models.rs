@@ -539,3 +539,39 @@ pub struct RoomProgressSummary {
     pub completed_rooms: i64,
     pub total_cabinets: i64,
 }
+
+/// Job file record (PDFs / documents attached to a job)
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct JobFileRecord {
+    pub id: i64,
+    pub uuid: String,
+    pub job_id: String,
+    pub file_name: String,
+    pub content_type: String,
+    pub extracted_text: Option<String>,
+    pub file_size: i64,
+    pub uploaded_by_device_id: Option<String>,
+    pub uploaded_by_name: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Job file metadata (without file_data blob, for listing)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobFileMeta {
+    pub uuid: String,
+    pub job_id: String,
+    pub file_name: String,
+    pub content_type: String,
+    pub file_size: i64,
+    pub uploaded_by_name: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Search result from job file content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobFileSearchResult {
+    pub file_uuid: String,
+    pub file_name: String,
+    pub job_id: String,
+    pub snippet: String,
+}

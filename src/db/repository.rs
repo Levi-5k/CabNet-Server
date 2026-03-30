@@ -2396,6 +2396,118 @@ impl Repository {
             _ => (false, 15),
         }
     }
+
+    // ==================== JOB FILES ====================
+
+    /// Insert a job file with extracted text
+    pub async fn insert_job_file(
+        &self,
+        uuid: &str,
+        job_id: &str,
+        file_name: &str,
+        content_type: &str,
+        file_data: &[u8],
+        extracted_text: Option<&str>,
+        device_id: Option<&str>,
+        uploader_name: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            r#"INSERT INTO job_files (uuid, job_id, file_name, content_type, file_data, extracted_text, file_size, uploaded_by_device_id, uploaded_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(uuid)
+        .bind(job_id)
+        .bind(file_name)
+        .bind(content_type)
+        .bind(file_data)
+        .bind(extracted_text)
+        .bind(file_data.len() as i64)
+        .bind(device_id)
+        .bind(uploader_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Get all files for a job (metadata only, no blob)
+    pub async fn get_job_files(&self, job_id: &str) -> anyhow::Result<Vec<super::models::JobFileMeta>> {
+        let records = sqlx::query_as::<_, super::models::JobFileRecord>(
+            "SELECT id, uuid, job_id, file_name, content_type, extracted_text, file_size, uploaded_by_device_id, uploaded_by_name, created_at FROM job_files WHERE job_id = ? ORDER BY created_at DESC"
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(records.into_iter().map(|r| super::models::JobFileMeta {
+            uuid: r.uuid,
+            job_id: r.job_id,
+            file_name: r.file_name,
+            content_type: r.content_type,
+            file_size: r.file_size,
+            uploaded_by_name: r.uploaded_by_name,
+            created_at: r.created_at,
+        }).collect())
+    }
+
+    /// Get file data by uuid
+    pub async fn get_job_file_data(&self, file_uuid: &str) -> anyhow::Result<Option<(String, String, Vec<u8>)>> {
+        let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT file_name, content_type, file_data FROM job_files WHERE uuid = ?"
+        )
+        .bind(file_uuid)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Delete a job file
+    pub async fn delete_job_file(&self, file_uuid: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM job_files WHERE uuid = ?")
+            .bind(file_uuid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Search job file extracted text for a query (and optionally scope to a job)
+    pub async fn search_job_files(&self, job_id: Option<&str>, query: &str) -> anyhow::Result<Vec<super::models::JobFileSearchResult>> {
+        let search_pattern = format!("%{}%", query);
+
+        let rows: Vec<(String, String, String, String)> = if let Some(jid) = job_id {
+            sqlx::query_as(
+                "SELECT uuid, file_name, job_id, extracted_text FROM job_files WHERE job_id = ? AND extracted_text LIKE ? COLLATE NOCASE"
+            )
+            .bind(jid)
+            .bind(&search_pattern)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT uuid, file_name, job_id, extracted_text FROM job_files WHERE extracted_text LIKE ? COLLATE NOCASE"
+            )
+            .bind(&search_pattern)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let lower_query = query.to_lowercase();
+        Ok(rows.into_iter().map(|(uuid, file_name, job_id, text)| {
+            // Extract a snippet around the match
+            let lower_text = text.to_lowercase();
+            let snippet = if let Some(pos) = lower_text.find(&lower_query) {
+                let start = pos.saturating_sub(80);
+                let end = (pos + lower_query.len() + 80).min(text.len());
+                let mut s = String::new();
+                if start > 0 { s.push_str("..."); }
+                s.push_str(&text[start..end]);
+                if end < text.len() { s.push_str("..."); }
+                s
+            } else {
+                text.chars().take(160).collect::<String>()
+            };
+            super::models::JobFileSearchResult { file_uuid: uuid, file_name, job_id, snippet }
+        }).collect())
+    }
 }
 
 /// Round a DateTime to the nearest N minutes

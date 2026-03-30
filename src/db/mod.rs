@@ -546,6 +546,31 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Job files table (PDFs / documents attached to jobs)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS job_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            job_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            content_type TEXT DEFAULT 'application/pdf',
+            file_data BLOB,
+            extracted_text TEXT,
+            file_size INTEGER DEFAULT 0,
+            uploaded_by_device_id TEXT,
+            uploaded_by_name TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_job_files_job_id ON job_files(job_id)")
+        .execute(pool)
+        .await?;
+
     tracing::info!("Database migrations completed");
     Ok(())
 }

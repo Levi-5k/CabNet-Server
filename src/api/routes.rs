@@ -107,6 +107,12 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/team/members/:device_id", delete(handlers::delete_team_member))
         // Timesheets
         .route("/api/timesheets", get(handlers::get_timesheets))
+        // Job Files (PDF uploads + search)
+        .route("/api/jobs/files/search", get(handlers::search_job_files))
+        .route("/api/jobs/:job_id/files", get(handlers::get_job_files))
+        .route("/api/jobs/:job_id/files", post(handlers::upload_job_file))
+        .route("/api/jobs/:job_id/files/:file_uuid", get(handlers::download_job_file))
+        .route("/api/jobs/:job_id/files/:file_uuid", delete(handlers::delete_job_file))
         .with_state(state)
         .layer(RequestDecompressionLayer::new()) // Decompress gzip requests from Android
         .layer(CompressionLayer::new()) // Compress responses with gzip/deflate

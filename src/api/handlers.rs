@@ -2384,3 +2384,251 @@ pub async fn set_time_rounding(
 
     Ok(Json(ApiResponse::success(config)))
 }
+
+// ==================== JOB FILES ====================
+
+#[derive(Serialize)]
+pub struct JobFilesResponse {
+    pub files: Vec<crate::db::models::JobFileMeta>,
+}
+
+#[derive(Serialize)]
+pub struct JobFileSearchResponse {
+    pub results: Vec<crate::db::models::JobFileSearchResult>,
+}
+
+#[derive(Deserialize)]
+pub struct JobFileSearchQuery {
+    pub q: String,
+    pub job_id: Option<String>,
+}
+
+/// POST /api/jobs/:job_id/files - Upload a file (PDF) for a job
+pub async fn upload_job_file(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<ApiResponse<crate::db::models::JobFileMeta>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("multipart/form-data") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Expected multipart/form-data"))));
+    }
+
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .unwrap_or("")
+        .trim();
+
+    if boundary.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing multipart boundary"))));
+    }
+
+    let body_bytes = body.to_vec();
+    let boundary_marker = format!("--{}", boundary);
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Extract filename
+    let file_name = body_str
+        .lines()
+        .find(|l| l.contains("filename="))
+        .and_then(|l| l.split("filename=\"").nth(1).and_then(|s| s.split('"').next()))
+        .unwrap_or("file.pdf")
+        .to_string();
+
+    // Extract device_id and uploader_name from form fields
+    let mut device_id: Option<String> = None;
+    let mut uploader_name: Option<String> = None;
+
+    let parts: Vec<&str> = body_str.split(&boundary_marker).collect();
+    let mut file_data: Option<Vec<u8>> = None;
+
+    for part in &parts {
+        if part.contains("name=\"device_id\"") {
+            if let Some(header_end) = part.find("\r\n\r\n") {
+                let val = part[header_end + 4..].trim_end_matches("\r\n").trim();
+                device_id = Some(val.to_string());
+            }
+        } else if part.contains("name=\"uploader_name\"") {
+            if let Some(header_end) = part.find("\r\n\r\n") {
+                let val = part[header_end + 4..].trim_end_matches("\r\n").trim();
+                uploader_name = Some(val.to_string());
+            }
+        } else if part.contains("name=\"file\"") || part.contains("filename=") {
+            if let Some(header_end) = part.find("\r\n\r\n") {
+                let data_start = header_end + 4;
+                let part_start = body_str.find(part).unwrap_or(0);
+                let abs_start = part_start + data_start;
+                let part_end_in_body = part_start + part.len();
+                let data_end = if part_end_in_body >= 2 { part_end_in_body - 2 } else { part_end_in_body };
+                if abs_start < data_end && abs_start < body_bytes.len() {
+                    let end = data_end.min(body_bytes.len());
+                    file_data = Some(body_bytes[abs_start..end].to_vec());
+                }
+            }
+        }
+    }
+
+    let file_bytes = file_data.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("No file data found")))
+    })?;
+
+    // Basic PDF text extraction for search
+    let extracted_text = extract_pdf_text(&file_bytes);
+
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let file_size = file_bytes.len() as i64;
+
+    state.repo.insert_job_file(
+        &uuid,
+        &job_id,
+        &file_name,
+        "application/pdf",
+        &file_bytes,
+        extracted_text.as_deref(),
+        device_id.as_deref(),
+        uploader_name.as_deref(),
+    ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    tracing::info!("File uploaded for job {}: {} ({} bytes, {} chars extracted)", job_id, file_name, file_size, extracted_text.as_ref().map(|t| t.len()).unwrap_or(0));
+
+    Ok(Json(ApiResponse::success(crate::db::models::JobFileMeta {
+        uuid,
+        job_id,
+        file_name,
+        content_type: "application/pdf".to_string(),
+        file_size,
+        uploaded_by_name: uploader_name,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+    })))
+}
+
+/// GET /api/jobs/:job_id/files - List files for a job
+pub async fn get_job_files(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<ApiResponse<JobFilesResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let files = state.repo.get_job_files(&job_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(JobFilesResponse { files })))
+}
+
+/// GET /api/jobs/:job_id/files/:file_uuid - Download a file
+pub async fn download_job_file(
+    State(state): State<SharedState>,
+    Path((job_id, file_uuid)): Path<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, Json<ApiResponse<()>>)> {
+    let _ = job_id;
+    let state = state.read().await;
+    let (file_name, content_type, data) = state.repo.get_job_file_data(&file_uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::error("File not found"))))?;
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("content-type", content_type)
+        .header("content-disposition", format!("attachment; filename=\"{}\"", file_name))
+        .body(axum::body::Body::from(data))
+        .unwrap())
+}
+
+/// DELETE /api/jobs/:job_id/files/:file_uuid - Delete a file
+pub async fn delete_job_file(
+    State(state): State<SharedState>,
+    Path((_job_id, file_uuid)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    state.repo.delete_job_file(&file_uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success_with_message((), "File deleted")))
+}
+
+/// GET /api/jobs/files/search?q=room+123&job_id=optional - Search file contents
+pub async fn search_job_files(
+    State(state): State<SharedState>,
+    Query(params): Query<JobFileSearchQuery>,
+) -> Result<Json<ApiResponse<JobFileSearchResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let results = state.repo.search_job_files(params.job_id.as_deref(), &params.q).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success(JobFileSearchResponse { results })))
+}
+
+/// Extract text from a PDF byte slice (basic extraction for search)
+fn extract_pdf_text(data: &[u8]) -> Option<String> {
+    let content = String::from_utf8_lossy(data);
+    let mut texts = Vec::new();
+
+    // Extract text between parentheses in BT..ET blocks
+    let mut in_text_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "BT" { in_text_block = true; continue; }
+        if trimmed == "ET" { in_text_block = false; continue; }
+        if in_text_block {
+            let mut i = 0;
+            let chars: Vec<char> = trimmed.chars().collect();
+            while i < chars.len() {
+                if chars[i] == '(' {
+                    let mut depth = 1;
+                    let mut text = String::new();
+                    i += 1;
+                    while i < chars.len() && depth > 0 {
+                        if chars[i] == '(' { depth += 1; }
+                        if chars[i] == ')' { depth -= 1; if depth == 0 { break; } }
+                        if chars[i] == '\\' && i + 1 < chars.len() {
+                            i += 1;
+                            match chars[i] {
+                                'n' => text.push('\n'),
+                                'r' => text.push('\r'),
+                                't' => text.push('\t'),
+                                _ => text.push(chars[i]),
+                            }
+                        } else {
+                            text.push(chars[i]);
+                        }
+                        i += 1;
+                    }
+                    if !text.trim().is_empty() {
+                        texts.push(text);
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
+    // Fallback: extract any printable ASCII sequences > 8 chars
+    if texts.is_empty() {
+        let mut current = String::new();
+        for &b in data {
+            if b >= 32 && b < 127 {
+                current.push(b as char);
+            } else {
+                if current.len() > 8 {
+                    let trimmed = current.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.starts_with("<<")
+                        && !trimmed.starts_with("/")
+                        && !trimmed.starts_with("stream")
+                        && !trimmed.starts_with("endstream")
+                        && !trimmed.starts_with("obj")
+                        && !trimmed.starts_with("endobj")
+                    {
+                        texts.push(trimmed.to_string());
+                    }
+                }
+                current.clear();
+            }
+        }
+    }
+
+    if texts.is_empty() { None } else { Some(texts.join(" ")) }
+}
