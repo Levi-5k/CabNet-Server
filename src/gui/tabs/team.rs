@@ -21,7 +21,6 @@ pub enum StatusFilter {
     All,
     Working,
     OnBreak,
-    Offline,
 }
 
 impl Default for TeamTab {
@@ -96,7 +95,6 @@ impl TeamTab {
         // Stats cards
         let working = self.team_status.iter().filter(|m| m.status == "working").count();
         let on_break = self.team_status.iter().filter(|m| m.status == "break").count();
-        let offline = self.team_status.iter().filter(|m| m.status == "offline").count();
         let total_scans: i64 = self.team_status.iter().map(|m| m.total_scans_today).sum();
 
         ui.horizontal(|ui| {
@@ -105,8 +103,6 @@ impl TeamTab {
             self.stat_card(ui, "🟢", "Working", &working.to_string(), egui::Color32::from_rgb(34, 197, 94));
             ui.add_space(12.0);
             self.stat_card(ui, "☕", "On Break", &on_break.to_string(), egui::Color32::from_rgb(251, 191, 36));
-            ui.add_space(12.0);
-            self.stat_card(ui, "⚫", "Offline", &offline.to_string(), egui::Color32::from_rgb(107, 114, 128));
             ui.add_space(12.0);
             self.stat_card(ui, "📊", "Scans Today", &total_scans.to_string(), egui::Color32::from_rgb(251, 146, 60));
         });
@@ -138,7 +134,6 @@ impl TeamTab {
                         (StatusFilter::All, "All"),
                         (StatusFilter::Working, "🟢 Working"),
                         (StatusFilter::OnBreak, "☕ Break"),
-                        (StatusFilter::Offline, "⚫ Offline"),
                     ] {
                         let is_selected = self.filter_status == filter;
                         let btn = egui::Button::new(
@@ -177,7 +172,6 @@ impl TeamTab {
                     StatusFilter::All => true,
                     StatusFilter::Working => m.status == "working",
                     StatusFilter::OnBreak => m.status == "break",
-                    StatusFilter::Offline => m.status == "offline",
                 };
 
                 matches_search && matches_filter
@@ -408,16 +402,17 @@ impl TeamTab {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.vertical(|ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                let (status_icon, status_text, status_color) = match member.status.as_str() {
-                                    "working" => ("🟢", "Working", egui::Color32::from_rgb(34, 197, 94)),
-                                    "break" => ("☕", "On Break", egui::Color32::from_rgb(251, 191, 36)),
-                                    _ => ("⚫", "Offline", egui::Color32::from_rgb(107, 114, 128)),
-                                };
-                                ui.label(
-                                    egui::RichText::new(format!("{} {}", status_icon, status_text))
-                                        .color(status_color)
-                                        .strong(),
-                                );
+                                if member.status == "working" || member.status == "break" {
+                                    let (status_icon, status_text, status_color) = match member.status.as_str() {
+                                        "working" => ("🟢", "Working", egui::Color32::from_rgb(34, 197, 94)),
+                                        _ => ("☕", "On Break", egui::Color32::from_rgb(251, 191, 36)),
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!("{} {}", status_icon, status_text))
+                                            .color(status_color)
+                                            .strong(),
+                                    );
+                                }
                             });
 
                             if let Some(ref job) = member.current_job {
