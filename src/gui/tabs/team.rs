@@ -165,7 +165,7 @@ impl TeamTab {
         ui.add_space(16.0);
 
         // Team member cards
-        let filtered: Vec<&TeamMemberStatus> = self
+        let filtered: Vec<TeamMemberStatus> = self
             .team_status
             .iter()
             .filter(|m| {
@@ -182,6 +182,7 @@ impl TeamTab {
 
                 matches_search && matches_filter
             })
+            .cloned()
             .collect();
 
         if filtered.is_empty() {
@@ -202,9 +203,22 @@ impl TeamTab {
             });
         } else {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut admin_toggle: Option<(String, bool)> = None;
                 for member in &filtered {
-                    self.member_card(ui, member);
+                    if let Some(toggle) = self.member_card(ui, member) {
+                        admin_toggle = Some(toggle);
+                    }
                     ui.add_space(8.0);
+                }
+                // Apply admin toggle outside the borrow
+                if let Some((device_id, new_admin)) = admin_toggle {
+                    let s = state.clone();
+                    runtime.block_on(async {
+                        let state = s.read().await;
+                        let _ = state.repo.set_team_member_admin(&device_id, new_admin).await;
+                    });
+                    self.last_refresh = None; // force refresh
+                    needs_refresh = true;
                 }
             });
         }
@@ -299,7 +313,9 @@ impl TeamTab {
             });
     }
 
-    fn member_card(&self, ui: &mut egui::Ui, member: &TeamMemberStatus) {
+    /// Returns Some((device_id, new_admin_value)) if admin was toggled
+    fn member_card(&self, ui: &mut egui::Ui, member: &TeamMemberStatus) -> Option<(String, bool)> {
+        let mut toggled_admin: Option<(String, bool)> = None;
         let border_color = match member.status.as_str() {
             "working" => egui::Color32::from_rgb(34, 197, 94),
             "break" => egui::Color32::from_rgb(251, 191, 36),
@@ -359,12 +375,19 @@ impl TeamTab {
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             );
-                            if member.is_admin {
-                                ui.label(
-                                    egui::RichText::new("👑 Admin")
-                                        .size(10.0)
-                                        .color(egui::Color32::from_rgb(251, 191, 36)),
-                                );
+                            // Admin toggle button
+                            let (admin_label, admin_color) = if member.is_admin {
+                                ("👑 Admin", egui::Color32::from_rgb(251, 191, 36))
+                            } else {
+                                ("  User  ", egui::Color32::from_rgb(107, 114, 128))
+                            };
+                            let admin_btn = egui::Button::new(
+                                egui::RichText::new(admin_label).size(10.0).color(admin_color),
+                            )
+                            .fill(egui::Color32::from_rgb(30, 30, 46))
+                            .rounding(egui::Rounding::same(4.0));
+                            if ui.add(admin_btn).on_hover_text("Click to toggle admin").clicked() {
+                                toggled_admin = Some((member.device_id.clone(), !member.is_admin));
                             }
                             ui.label(
                                 egui::RichText::new(&member.role)
@@ -418,5 +441,6 @@ impl TeamTab {
                     });
                 });
             });
+        toggled_admin
     }
 }

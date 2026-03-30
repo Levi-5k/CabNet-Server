@@ -1990,7 +1990,8 @@ impl Repository {
     pub async fn upsert_team_member(&self, input: &TeamMemberInput) -> anyhow::Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let role = input.role.clone().unwrap_or_else(|| "worker".to_string());
-        let is_admin = input.is_admin.unwrap_or(false) as i32;
+        let is_admin_insert = input.is_admin.unwrap_or(false) as i32;
+        let is_admin_update: Option<i32> = input.is_admin.map(|v| v as i32);
 
         let result = sqlx::query(
             r#"INSERT INTO team_members (device_id, display_name, phone_number, role, is_admin, avatar_color, updated_at)
@@ -1999,7 +2000,7 @@ impl Repository {
                 display_name = excluded.display_name,
                 phone_number = COALESCE(excluded.phone_number, team_members.phone_number),
                 role = excluded.role,
-                is_admin = excluded.is_admin,
+                is_admin = COALESCE(?, team_members.is_admin),
                 avatar_color = COALESCE(excluded.avatar_color, team_members.avatar_color),
                 updated_at = excluded.updated_at"#,
         )
@@ -2007,13 +2008,23 @@ impl Repository {
         .bind(&input.display_name)
         .bind(&input.phone_number)
         .bind(&role)
-        .bind(is_admin)
+        .bind(is_admin_insert)
         .bind(&input.avatar_color)
         .bind(&now)
+        .bind(is_admin_update) // 8th param: nullable for ON CONFLICT update
         .execute(&self.pool)
         .await?;
 
         Ok(result.last_insert_rowid())
+    }
+
+    /// Get a team member by device ID
+    pub async fn get_team_member_by_device(&self, device_id: &str) -> anyhow::Result<Option<TeamMember>> {
+        let member = sqlx::query_as::<_, TeamMember>("SELECT * FROM team_members WHERE device_id = ?")
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(member)
     }
 
     /// Get all team members
@@ -2027,6 +2038,16 @@ impl Repository {
     /// Delete a team member
     pub async fn delete_team_member(&self, device_id: &str) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM team_members WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update admin status for a team member
+    pub async fn set_team_member_admin(&self, device_id: &str, is_admin: bool) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE team_members SET is_admin = ? WHERE device_id = ?")
+            .bind(is_admin as i32)
             .bind(device_id)
             .execute(&self.pool)
             .await?;

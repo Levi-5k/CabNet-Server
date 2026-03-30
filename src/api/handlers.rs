@@ -355,6 +355,7 @@ pub struct ConnectResponse {
     pub device_id: String,
     pub server_version: String,
     pub server_time: i64,
+    pub is_admin: bool,
 }
 
 #[derive(Deserialize)]
@@ -1142,12 +1143,20 @@ pub async fn device_connect(
 
     tracing::info!("Device connected: {} ({})", device_id, device_input.device_name.as_deref().unwrap_or("unnamed"));
 
+    // Look up admin status from team member record
+    let is_admin = state.repo.get_team_member_by_device(&device_id).await
+        .ok()
+        .flatten()
+        .map(|m| m.is_admin != 0)
+        .unwrap_or(false);
+
     Ok(Json(ApiResponse::success_with_message(
         ConnectResponse {
             connected: true,
             device_id,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             server_time: chrono::Utc::now().timestamp_millis(),
+            is_admin,
         },
         "Device connected successfully",
     )))
