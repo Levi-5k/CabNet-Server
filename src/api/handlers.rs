@@ -1967,62 +1967,21 @@ pub async fn get_reports(
 pub async fn upload_report_photo(
     State(state): State<SharedState>,
     Path(report_id): Path<String>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    mut multipart: axum::extract::Multipart,
 ) -> Result<Json<ApiResponse<SyncReportsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
 
-    // Parse multipart boundary from content type
-    let content_type = headers.get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if !content_type.contains("multipart/form-data") {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Expected multipart/form-data"))));
-    }
-
-    let boundary = content_type
-        .split("boundary=")
-        .nth(1)
-        .unwrap_or("")
-        .trim();
-
-    if boundary.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing multipart boundary"))));
-    }
-
-    // Simple multipart parse - find the file data between boundaries
-    let body_bytes = body.to_vec();
-    let boundary_marker = format!("--{}", boundary);
-    let body_str = String::from_utf8_lossy(&body_bytes);
-
-    // Find filename from Content-Disposition header
-    let file_name = body_str
-        .lines()
-        .find(|l| l.contains("filename="))
-        .and_then(|l| {
-            l.split("filename=\"").nth(1).and_then(|s| s.split('"').next())
-        })
-        .unwrap_or("photo.jpg")
-        .to_string();
-
-    // Find the file data: after the double CRLF following the part headers, before the closing boundary
-    let parts: Vec<&str> = body_str.split(&boundary_marker).collect();
+    let mut file_name = String::from("photo.jpg");
     let mut photo_data: Option<Vec<u8>> = None;
 
-    for part in &parts {
-        if part.contains("Content-Type: image/") || part.contains("name=\"photo\"") {
-            // Find the blank line that separates headers from body
-            if let Some(header_end) = part.find("\r\n\r\n") {
-                let data_start = header_end + 4;
-                // Find this position in original bytes
-                let part_start = body_str.find(part).unwrap_or(0);
-                let abs_start = part_start + data_start;
-                // Data ends before the closing \r\n
-                let data_end = body_bytes.len().saturating_sub(boundary_marker.len() + 6);
-                if abs_start < data_end && abs_start < body_bytes.len() {
-                    photo_data = Some(body_bytes[abs_start..data_end].to_vec());
-                }
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "photo" || name == "file" {
+            if let Some(fname) = field.file_name() {
+                file_name = fname.to_string();
+            }
+            if let Ok(bytes) = field.bytes().await {
+                photo_data = Some(bytes.to_vec());
             }
         }
     }
@@ -2407,71 +2366,38 @@ pub struct JobFileSearchQuery {
 pub async fn upload_job_file(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    mut multipart: axum::extract::Multipart,
 ) -> Result<Json<ApiResponse<crate::db::models::JobFileMeta>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
 
-    let content_type = headers.get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if !content_type.contains("multipart/form-data") {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Expected multipart/form-data"))));
-    }
-
-    let boundary = content_type
-        .split("boundary=")
-        .nth(1)
-        .unwrap_or("")
-        .trim();
-
-    if boundary.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing multipart boundary"))));
-    }
-
-    let body_bytes = body.to_vec();
-    let boundary_marker = format!("--{}", boundary);
-    let body_str = String::from_utf8_lossy(&body_bytes);
-
-    // Extract filename
-    let file_name = body_str
-        .lines()
-        .find(|l| l.contains("filename="))
-        .and_then(|l| l.split("filename=\"").nth(1).and_then(|s| s.split('"').next()))
-        .unwrap_or("file.pdf")
-        .to_string();
-
-    // Extract device_id and uploader_name from form fields
+    let mut file_name = String::from("file.pdf");
+    let mut file_data: Option<Vec<u8>> = None;
     let mut device_id: Option<String> = None;
     let mut uploader_name: Option<String> = None;
 
-    let parts: Vec<&str> = body_str.split(&boundary_marker).collect();
-    let mut file_data: Option<Vec<u8>> = None;
-
-    for part in &parts {
-        if part.contains("name=\"device_id\"") {
-            if let Some(header_end) = part.find("\r\n\r\n") {
-                let val = part[header_end + 4..].trim_end_matches("\r\n").trim();
-                device_id = Some(val.to_string());
-            }
-        } else if part.contains("name=\"uploader_name\"") {
-            if let Some(header_end) = part.find("\r\n\r\n") {
-                let val = part[header_end + 4..].trim_end_matches("\r\n").trim();
-                uploader_name = Some(val.to_string());
-            }
-        } else if part.contains("name=\"file\"") || part.contains("filename=") {
-            if let Some(header_end) = part.find("\r\n\r\n") {
-                let data_start = header_end + 4;
-                let part_start = body_str.find(part).unwrap_or(0);
-                let abs_start = part_start + data_start;
-                let part_end_in_body = part_start + part.len();
-                let data_end = if part_end_in_body >= 2 { part_end_in_body - 2 } else { part_end_in_body };
-                if abs_start < data_end && abs_start < body_bytes.len() {
-                    let end = data_end.min(body_bytes.len());
-                    file_data = Some(body_bytes[abs_start..end].to_vec());
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                if let Some(fname) = field.file_name() {
+                    file_name = fname.to_string();
+                }
+                match field.bytes().await {
+                    Ok(bytes) => file_data = Some(bytes.to_vec()),
+                    Err(e) => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(format!("Failed to read file: {}", e))))),
                 }
             }
+            "device_id" => {
+                if let Ok(text) = field.text().await {
+                    device_id = Some(text.trim().to_string());
+                }
+            }
+            "uploader_name" => {
+                if let Ok(text) = field.text().await {
+                    uploader_name = Some(text.trim().to_string());
+                }
+            }
+            _ => {}
         }
     }
 
