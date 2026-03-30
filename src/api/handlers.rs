@@ -2406,7 +2406,7 @@ pub async fn upload_job_file(
     })?;
 
     // Basic PDF text extraction for search
-    let extracted_text = extract_pdf_text(&file_bytes);
+    let extracted_text = extract_pdf_text(&file_bytes, &file_name);
 
     let uuid = uuid::Uuid::new_v4().to_string();
     let file_size = file_bytes.len() as i64;
@@ -2422,19 +2422,35 @@ pub async fn upload_job_file(
         uploader_name.as_deref(),
     ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
 
-    tracing::info!("File uploaded for job {}: {} ({} bytes, {} chars extracted)", job_id, file_name, file_size, extracted_text.as_ref().map(|t| t.len()).unwrap_or(0));
+    tracing::info!("[PDF] Upload complete: job={}, file='{}', size={} bytes, extracted={} chars",
+        job_id, file_name, file_size,
+        extracted_text.as_ref().map(|t| t.len()).unwrap_or(0));
 
     // If this is a lading/shipping/packing PDF, parse ticket data
     let lower_name = file_name.to_lowercase();
-    if lower_name.contains("lading") || lower_name.contains("shipping") || lower_name.contains("packing") || lower_name.contains("bol") {
+    let is_lading = lower_name.contains("lading") || lower_name.contains("shipping")
+        || lower_name.contains("packing") || lower_name.contains("bol");
+
+    if is_lading {
+        tracing::info!("[PDF] File '{}' detected as lading/shipping PDF, attempting ticket parsing", file_name);
         if let Some(ref text) = extracted_text {
-            let tickets = parse_lading_tickets(text, &job_id, &uuid);
+            let tickets = parse_lading_tickets(text, &job_id, &uuid, &file_name);
             if !tickets.is_empty() {
                 let count = tickets.len();
-                let _ = state.repo.insert_lading_tickets(&tickets).await;
-                tracing::info!("Parsed {} lading tickets from {}", count, file_name);
+                match state.repo.insert_lading_tickets(&tickets).await {
+                    Ok(inserted) => tracing::info!("[PDF] Inserted {} lading tickets from '{}'", inserted, file_name),
+                    Err(e) => tracing::error!("[PDF] Failed to insert lading tickets from '{}': {}", file_name, e),
+                }
+                tracing::info!("[PDF] Parsed {} lading tickets from '{}'", count, file_name);
+            } else {
+                tracing::warn!("[PDF] Lading file '{}' yielded 0 tickets from {} chars of text. First 500 chars: {:?}",
+                    file_name, text.len(), &text[..text.len().min(500)]);
             }
+        } else {
+            tracing::warn!("[PDF] Lading file '{}' has no extracted text — cannot parse tickets", file_name);
         }
+    } else {
+        tracing::debug!("[PDF] File '{}' not a lading PDF, skipping ticket parsing", file_name);
     }
 
     Ok(Json(ApiResponse::success(crate::db::models::JobFileMeta {
@@ -2500,52 +2516,198 @@ pub async fn search_job_files(
     Ok(Json(ApiResponse::success(JobFileSearchResponse { results })))
 }
 
-/// Extract text from a PDF byte slice (basic extraction for search)
-fn extract_pdf_text(data: &[u8]) -> Option<String> {
-    let content = String::from_utf8_lossy(data);
-    let mut texts = Vec::new();
+/// Extract text from a PDF byte slice (basic extraction for search).
+/// Supports both uncompressed and FlateDecode-compressed content streams.
+fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
 
-    // Extract text between parentheses in BT..ET blocks
-    let mut in_text_block = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "BT" { in_text_block = true; continue; }
-        if trimmed == "ET" { in_text_block = false; continue; }
-        if in_text_block {
-            let mut i = 0;
-            let chars: Vec<char> = trimmed.chars().collect();
-            while i < chars.len() {
-                if chars[i] == '(' {
-                    let mut depth = 1;
-                    let mut text = String::new();
-                    i += 1;
-                    while i < chars.len() && depth > 0 {
-                        if chars[i] == '(' { depth += 1; }
-                        if chars[i] == ')' { depth -= 1; if depth == 0 { break; } }
-                        if chars[i] == '\\' && i + 1 < chars.len() {
-                            i += 1;
-                            match chars[i] {
-                                'n' => text.push('\n'),
-                                'r' => text.push('\r'),
-                                't' => text.push('\t'),
-                                _ => text.push(chars[i]),
-                            }
-                        } else {
-                            text.push(chars[i]);
+    tracing::debug!("[PDF:extract] Starting text extraction for '{}' ({} bytes)", file_name, data.len());
+
+    // --- Phase 1: Locate and decompress PDF content streams ---
+    let mut stream_contents: Vec<String> = Vec::new();
+
+    // Find all "stream" / "endstream" markers in the raw bytes
+    let raw = data;
+    let mut pos = 0;
+    while pos < raw.len() {
+        // Look for "stream" keyword (followed by \r\n or \n)
+        if let Some(idx) = find_bytes(&raw[pos..], b"stream") {
+            let abs = pos + idx;
+            // Make sure this is the keyword "stream" and not "endstream"
+            if abs > 0 && raw[abs - 1] == b'd' {
+                // This is "endstream", skip
+                pos = abs + 6;
+                continue;
+            }
+            // Skip past "stream" + newline(s)
+            let mut start = abs + 6; // past "stream"
+            if start < raw.len() && raw[start] == b'\r' { start += 1; }
+            if start < raw.len() && raw[start] == b'\n' { start += 1; }
+
+            // Find matching "endstream"
+            if let Some(end_off) = find_bytes(&raw[start..], b"endstream") {
+                let end = start + end_off;
+                let stream_data = &raw[start..end];
+
+                // Look backward from "stream" to find the object dictionary and check for /FlateDecode
+                let dict_start = if abs > 1024 { abs - 1024 } else { 0 };
+                let dict_region = &raw[dict_start..abs];
+                let dict_str = String::from_utf8_lossy(dict_region);
+                let is_flate = dict_str.contains("/FlateDecode") || dict_str.contains("/Fl");
+
+                if is_flate {
+                    // Decompress with zlib
+                    let mut decoder = ZlibDecoder::new(stream_data);
+                    let mut decompressed = Vec::new();
+                    match decoder.read_to_end(&mut decompressed) {
+                        Ok(n) => {
+                            let text = String::from_utf8_lossy(&decompressed).to_string();
+                            tracing::debug!("[PDF:extract] Decompressed FlateDecode stream: {} -> {} bytes", stream_data.len(), n);
+                            stream_contents.push(text);
                         }
-                        i += 1;
+                        Err(e) => {
+                            tracing::debug!("[PDF:extract] Failed to decompress stream at offset {}: {}", abs, e);
+                        }
                     }
-                    if !text.trim().is_empty() {
-                        texts.push(text);
+                } else {
+                    // Uncompressed stream — use as-is
+                    let text = String::from_utf8_lossy(stream_data).to_string();
+                    if text.contains("BT") {
+                        tracing::debug!("[PDF:extract] Found uncompressed stream with BT markers ({} bytes)", stream_data.len());
+                        stream_contents.push(text);
                     }
                 }
-                i += 1;
+                pos = end + 9; // past "endstream"
+            } else {
+                pos = abs + 6;
             }
+        } else {
+            break;
         }
     }
 
-    // Fallback: extract any printable ASCII sequences > 8 chars
-    if texts.is_empty() {
+    tracing::debug!("[PDF:extract] Found {} content streams to scan for text", stream_contents.len());
+
+    // If no streams found at all, try the whole file as lossy UTF-8 (for uncompressed PDFs)
+    if stream_contents.is_empty() {
+        let whole = String::from_utf8_lossy(data).to_string();
+        if whole.contains("BT") {
+            tracing::debug!("[PDF:extract] No streams found, falling back to whole-file scan");
+            stream_contents.push(whole);
+        }
+    }
+
+    // --- Phase 2: Extract text from BT..ET blocks ---
+    let mut all_texts: Vec<String> = Vec::new();
+
+    for content in &stream_contents {
+        let chars: Vec<char> = content.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        let mut in_bt = false;
+        let mut line_texts: Vec<String> = Vec::new();
+
+        while i < len {
+            // Detect BT (start of text block)
+            if !in_bt && i + 1 < len && chars[i] == 'B' && chars[i + 1] == 'T'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n' || chars[i + 2] == '\r')
+            {
+                in_bt = true;
+                i += 2;
+                continue;
+            }
+
+            // Detect ET (end of text block)
+            if in_bt && i + 1 < len && chars[i] == 'E' && chars[i + 1] == 'T'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n' || chars[i + 2] == '\r')
+            {
+                in_bt = false;
+                // Each BT..ET block is one logical line
+                if !line_texts.is_empty() {
+                    all_texts.push(line_texts.join(""));
+                    line_texts.clear();
+                }
+                i += 2;
+                continue;
+            }
+
+            // Inside BT..ET, extract parenthesized strings
+            if in_bt && chars[i] == '(' {
+                let mut depth = 1;
+                let mut text = String::new();
+                i += 1;
+                while i < len && depth > 0 {
+                    if chars[i] == '(' && (i == 0 || chars[i - 1] != '\\') { depth += 1; }
+                    else if chars[i] == ')' && (i == 0 || chars[i - 1] != '\\') {
+                        depth -= 1;
+                        if depth == 0 { break; }
+                    }
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 1;
+                        match chars[i] {
+                            'n' => text.push('\n'),
+                            'r' => text.push('\r'),
+                            't' => text.push('\t'),
+                            '(' => text.push('('),
+                            ')' => text.push(')'),
+                            '\\' => text.push('\\'),
+                            _ => text.push(chars[i]),
+                        }
+                    } else {
+                        text.push(chars[i]);
+                    }
+                    i += 1;
+                }
+                // Don't trim — preserve spaces; we'll trim at the ticket-parsing stage
+                if !text.is_empty() {
+                    line_texts.push(text);
+                }
+            }
+
+            // Also handle hex strings <4F6E65> inside BT..ET
+            if in_bt && chars[i] == '<' && (i + 1 < len && chars[i + 1] != '<') {
+                let mut hex = String::new();
+                i += 1;
+                while i < len && chars[i] != '>' {
+                    if chars[i].is_ascii_hexdigit() {
+                        hex.push(chars[i]);
+                    }
+                    i += 1;
+                }
+                // Convert hex pairs to bytes then to string
+                let bytes: Vec<u8> = (0..hex.len())
+                    .step_by(2)
+                    .filter_map(|j| {
+                        if j + 2 <= hex.len() {
+                            u8::from_str_radix(&hex[j..j + 2], 16).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let decoded = String::from_utf8_lossy(&bytes).to_string();
+                if !decoded.trim().is_empty() {
+                    line_texts.push(decoded);
+                }
+            }
+
+            i += 1;
+        }
+
+        // If we ended inside a BT block (malformed PDF), flush remaining
+        if !line_texts.is_empty() {
+            all_texts.push(line_texts.join(""));
+        }
+    }
+
+    tracing::debug!("[PDF:extract] Extracted {} text lines from BT/ET blocks", all_texts.len());
+
+    // --- Phase 3: Fallback if no BT/ET text found ---
+    if all_texts.is_empty() {
+        tracing::debug!("[PDF:extract] No BT/ET text found, trying ASCII fallback");
         let mut current = String::new();
         for &b in data {
             if b >= 32 && b < 127 {
@@ -2555,28 +2717,50 @@ fn extract_pdf_text(data: &[u8]) -> Option<String> {
                     let trimmed = current.trim();
                     if !trimmed.is_empty()
                         && !trimmed.starts_with("<<")
-                        && !trimmed.starts_with("/")
+                        && !trimmed.starts_with('/')
                         && !trimmed.starts_with("stream")
                         && !trimmed.starts_with("endstream")
                         && !trimmed.starts_with("obj")
                         && !trimmed.starts_with("endobj")
+                        && !trimmed.starts_with("xref")
+                        && !trimmed.starts_with("trailer")
                     {
-                        texts.push(trimmed.to_string());
+                        all_texts.push(trimmed.to_string());
                     }
                 }
                 current.clear();
             }
         }
+        if !all_texts.is_empty() {
+            tracing::debug!("[PDF:extract] ASCII fallback found {} text segments", all_texts.len());
+        }
     }
 
-    if texts.is_empty() { None } else { Some(texts.join(" ")) }
+    if all_texts.is_empty() {
+        tracing::warn!("[PDF:extract] No text extracted from '{}' ({} bytes) — PDF may use unsupported encoding (CID/Type3 fonts)", file_name, data.len());
+        None
+    } else {
+        // Join with newlines to preserve line structure for ticket parsing
+        let result = all_texts.join("\n");
+        tracing::info!("[PDF:extract] Extracted {} chars ({} lines) from '{}'", result.len(), all_texts.len(), file_name);
+        Some(result)
+    }
+}
+
+/// Find a byte pattern in a slice, returning the offset of the first match
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Parse lading/shipping PDF text into ticket records
 /// Returns tuples of (job_id, file_uuid, ticket_number, description, room, qty, section)
-fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
+fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
     let mut tickets = Vec::new();
     let mut current_section: Option<String> = None;
+    let mut skipped_lines = 0u32;
+    let total_lines = text.split('\n').count();
+
+    tracing::debug!("[PDF:tickets] Parsing {} lines of text from '{}' for job {}", total_lines, file_name, job_id);
 
     for line in text.split('\n') {
         let line = line.trim();
@@ -2586,12 +2770,13 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str) -> Vec<(Strin
         let upper = line.to_uppercase();
         if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING") {
             current_section = Some(line.to_string());
+            tracing::debug!("[PDF:tickets] Section header detected: '{}'", line);
             continue;
         }
 
         // Skip header lines
-        if upper.contains("PRIORITY") && upper.contains("TICKET") { continue; }
-        if upper.contains("REPORT REF") || upper.contains("RUN DATE") { continue; }
+        if upper.contains("PRIORITY") && upper.contains("TICKET") { skipped_lines += 1; continue; }
+        if upper.contains("REPORT REF") || upper.contains("RUN DATE") { skipped_lines += 1; continue; }
 
         // Try to parse ticket lines: "000115 SS Counter Top 103 1"
         // Pattern: ticket_number (digits, 3-8 chars) followed by description, room, qty
@@ -2601,6 +2786,7 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str) -> Vec<(Strin
         // First token should be a ticket number (all digits, 3-8 chars)
         let first = parts[0];
         if first.len() < 3 || first.len() > 8 || !first.chars().all(|c| c.is_ascii_digit()) {
+            skipped_lines += 1;
             continue;
         }
 
@@ -2663,6 +2849,16 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str) -> Vec<(Strin
             qty,
             current_section.clone(),
         ));
+    }
+
+    tracing::info!("[PDF:tickets] Parsed {} tickets from '{}' ({} lines, {} skipped, section: {:?})",
+        tickets.len(), file_name, total_lines, skipped_lines, current_section);
+
+    if tickets.is_empty() && total_lines > 5 {
+        // Log a sample of lines to help diagnose why no tickets were found
+        let sample: Vec<&str> = text.split('\n').filter(|l| !l.trim().is_empty()).take(10).collect();
+        tracing::warn!("[PDF:tickets] No tickets parsed from {} non-empty lines. Sample lines:\n{}",
+            total_lines, sample.join("\n  "));
     }
 
     tickets

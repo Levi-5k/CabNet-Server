@@ -46,6 +46,7 @@ regex = "1.10"
 open = "5"
 rand = "0.8"
 md5 = "0.7"
+flate2 = "1.0"
 
 # CSV export
 csv = "1.3"
