@@ -9,19 +9,26 @@ use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging
+    // Initialize logging — stdout + file (Documents/CabNet/server.log)
+    let data_dir = get_data_dir();
+    std::fs::create_dir_all(&data_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&data_dir, "server.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "codebar_server=debug,tower_http=info".into());
+
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "codebar_server=info,tower_http=info".into()),
-        )
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
         .init();
 
     tracing::info!("Starting CabNet Server v{}", env!("CARGO_PKG_VERSION"));
-
-    // Log where data is stored
-    let data_dir = get_data_dir();
     tracing::info!("Data directory: {}", data_dir.display());
 
     // Load configuration
