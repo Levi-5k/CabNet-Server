@@ -2517,8 +2517,7 @@ pub async fn search_job_files(
 }
 
 /// Extract text from a PDF byte slice (basic extraction for search).
-/// Supports both uncompressed and FlateDecode-compressed content streams.
-/// Handles custom font encodings via /ToUnicode CMap parsing.
+/// Supports FlateDecode-compressed streams and per-font /ToUnicode CMap encoding.
 fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
     use flate2::read::ZlibDecoder;
     use std::collections::HashMap;
@@ -2526,20 +2525,23 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
 
     tracing::debug!("[PDF:extract] Starting text extraction for '{}' ({} bytes)", file_name, data.len());
 
-    // --- Phase 1: Locate and decompress ALL PDF streams ---
-    let mut stream_contents: Vec<String> = Vec::new();
+    let raw_str = String::from_utf8_lossy(data);
+
+    // --- Phase 1: Index objects and decompress streams ---
+    // Build obj_number -> decompressed stream content
+    let mut obj_streams: HashMap<u32, String> = HashMap::new();
+    // Also keep a flat list for fallback
+    let mut all_streams: Vec<String> = Vec::new();
 
     let raw = data;
     let mut pos = 0;
     while pos < raw.len() {
         if let Some(idx) = find_bytes(&raw[pos..], b"stream") {
             let abs = pos + idx;
-            // Make sure this is "stream" and not "endstream"
             if abs > 0 && raw[abs - 1] == b'd' {
                 pos = abs + 6;
                 continue;
             }
-            // Skip past "stream" + newline(s)
             let mut start = abs + 6;
             if start < raw.len() && raw[start] == b'\r' { start += 1; }
             if start < raw.len() && raw[start] == b'\n' { start += 1; }
@@ -2548,30 +2550,39 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 let end = start + end_off;
                 let stream_data = &raw[start..end];
 
-                // Check dictionary region before "stream" for /FlateDecode
-                let dict_start = if abs > 1024 { abs - 1024 } else { 0 };
+                let dict_start = if abs > 2048 { abs - 2048 } else { 0 };
                 let dict_region = &raw[dict_start..abs];
                 let dict_str = String::from_utf8_lossy(dict_region);
                 let is_flate = dict_str.contains("/FlateDecode") || dict_str.contains("/Fl");
 
-                if is_flate {
+                // Try to find the object number: look for "N 0 obj" before this stream
+                let obj_num = parse_obj_number_before(&dict_str);
+
+                let content = if is_flate {
                     let mut decoder = ZlibDecoder::new(stream_data);
                     let mut decompressed = Vec::new();
                     match decoder.read_to_end(&mut decompressed) {
                         Ok(n) => {
-                            let text = String::from_utf8_lossy(&decompressed).to_string();
-                            tracing::debug!("[PDF:extract] Decompressed FlateDecode stream: {} -> {} bytes", stream_data.len(), n);
-                            stream_contents.push(text);
+                            tracing::debug!("[PDF:extract] Decompressed stream (obj {:?}): {} -> {} bytes",
+                                obj_num, stream_data.len(), n);
+                            Some(String::from_utf8_lossy(&decompressed).to_string())
                         }
                         Err(e) => {
                             tracing::debug!("[PDF:extract] Failed to decompress stream at offset {}: {}", abs, e);
+                            None
                         }
                     }
                 } else {
-                    let text = String::from_utf8_lossy(stream_data).to_string();
-                    // Keep all streams (CMap or content)
-                    stream_contents.push(text);
+                    Some(String::from_utf8_lossy(stream_data).to_string())
+                };
+
+                if let Some(text) = content {
+                    if let Some(num) = obj_num {
+                        obj_streams.insert(num, text.clone());
+                    }
+                    all_streams.push(text);
                 }
+
                 pos = end + 9;
             } else {
                 pos = abs + 6;
@@ -2581,47 +2592,128 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
         }
     }
 
-    tracing::debug!("[PDF:extract] Found {} streams total", stream_contents.len());
+    tracing::debug!("[PDF:extract] Found {} streams ({} with object numbers)", all_streams.len(), obj_streams.len());
 
-    // If no streams found, try the whole file as lossy UTF-8
-    if stream_contents.is_empty() {
+    if all_streams.is_empty() {
         let whole = String::from_utf8_lossy(data).to_string();
         if whole.contains("BT") {
             tracing::debug!("[PDF:extract] No streams found, falling back to whole-file scan");
-            stream_contents.push(whole);
+            all_streams.push(whole);
         }
     }
 
-    // --- Phase 1.5: Parse /ToUnicode CMap streams for font encoding ---
-    let mut unicode_map: HashMap<u8, char> = HashMap::new();
-    let mut cmap_count = 0;
+    // --- Phase 2: Build per-font CMap tables ---
+    // Step 2a: Find font objects and their /ToUnicode references
+    // Look for patterns like: /Type /Font ... /ToUnicode N 0 R
+    // And font resource mappings: /Font << /F1 N 0 R /F2 M 0 R >>
+    let mut font_to_tounicode_obj: HashMap<String, u32> = HashMap::new(); // font_name -> tounicode obj num
+    let mut font_cmaps: HashMap<String, HashMap<u16, char>> = HashMap::new(); // font_name -> cmap
 
-    for content in &stream_contents {
-        if content.contains("beginbfchar") || content.contains("beginbfrange") {
-            let entries = parse_tounicode_cmap(content, &mut unicode_map);
-            if entries > 0 {
-                cmap_count += 1;
-                tracing::debug!("[PDF:extract] Parsed CMap #{}: {} character mappings (total: {})",
-                    cmap_count, entries, unicode_map.len());
+    // Parse the raw PDF text (not streams) for font dictionaries
+    // Find /Font resource dictionaries: /Font << /F1 5 0 R /F2 6 0 R >>
+    let mut font_name_to_obj: HashMap<String, u32> = HashMap::new();
+    {
+        let re_font_res = "/Font";
+        let mut search_pos = 0;
+        while let Some(font_pos) = raw_str[search_pos..].find(re_font_res) {
+            let abs_pos = search_pos + font_pos + re_font_res.len();
+            // Find the next << ... >>
+            if let Some(dict_open) = raw_str[abs_pos..].find("<<") {
+                let dict_start = abs_pos + dict_open + 2;
+                // Only look if << is very close (within 20 chars, allowing whitespace)
+                if dict_open > 20 {
+                    search_pos = abs_pos;
+                    continue;
+                }
+                if let Some(dict_close) = raw_str[dict_start..].find(">>") {
+                    let dict_content = &raw_str[dict_start..dict_start + dict_close];
+                    // Parse "/F1 5 0 R /F2 6 0 R" etc.
+                    let tokens: Vec<&str> = dict_content.split_whitespace().collect();
+                    let mut t = 0;
+                    while t + 3 < tokens.len() {
+                        if tokens[t].starts_with('/') && tokens[t + 2] == "0" && tokens[t + 3] == "R" {
+                            let font_name = tokens[t][1..].to_string(); // e.g. "F1"
+                            if let Ok(obj_num) = tokens[t + 1].parse::<u32>() {
+                                font_name_to_obj.insert(font_name, obj_num);
+                            }
+                            t += 4;
+                        } else {
+                            t += 1;
+                        }
+                    }
+                    search_pos = dict_start + dict_close;
+                } else {
+                    search_pos = abs_pos;
+                }
+            } else {
+                search_pos = abs_pos;
             }
         }
     }
+    tracing::debug!("[PDF:extract] Font resource names: {:?}", font_name_to_obj);
 
-    if !unicode_map.is_empty() {
-        tracing::info!("[PDF:extract] Built unicode map with {} entries from {} CMap stream(s) for '{}'",
-            unicode_map.len(), cmap_count, file_name);
+    // Now for each font object, find its /ToUnicode reference
+    for (font_name, font_obj_num) in &font_name_to_obj {
+        // Find the font object dictionary in the raw PDF
+        let obj_marker = format!("{} 0 obj", font_obj_num);
+        if let Some(obj_pos) = raw_str.find(&obj_marker) {
+            let search_region = &raw_str[obj_pos..std::cmp::min(obj_pos + 2000, raw_str.len())];
+            // Look for /ToUnicode N 0 R
+            if let Some(tu_pos) = search_region.find("/ToUnicode") {
+                let after_tu = &search_region[tu_pos + 10..];
+                let tokens: Vec<&str> = after_tu.split_whitespace().take(3).collect();
+                if tokens.len() >= 3 && tokens[1] == "0" && tokens[2] == "R" {
+                    if let Ok(tu_obj) = tokens[0].parse::<u32>() {
+                        font_to_tounicode_obj.insert(font_name.clone(), tu_obj);
+                    }
+                }
+            }
+        }
+    }
+    tracing::debug!("[PDF:extract] Font -> ToUnicode obj: {:?}", font_to_tounicode_obj);
+
+    // Parse each font's ToUnicode CMap
+    for (font_name, tu_obj_num) in &font_to_tounicode_obj {
+        if let Some(cmap_content) = obj_streams.get(tu_obj_num) {
+            let mut cmap: HashMap<u16, char> = HashMap::new();
+            let entries = parse_tounicode_cmap_u16(cmap_content, &mut cmap);
+            if entries > 0 {
+                tracing::debug!("[PDF:extract] Font '{}' CMap (obj {}): {} entries", font_name, tu_obj_num, entries);
+                font_cmaps.insert(font_name.clone(), cmap);
+            }
+        } else {
+            // CMap might be in an unindexed stream — try to find it in all_streams
+            tracing::debug!("[PDF:extract] ToUnicode obj {} for font '{}' not found in indexed streams", tu_obj_num, font_name);
+        }
     }
 
-    // --- Phase 2: Extract text from BT..ET blocks ---
-    let mut all_texts: Vec<String> = Vec::new();
-    let has_cmap = !unicode_map.is_empty();
+    // Fallback: if we found CMap streams but couldn't associate them with fonts,
+    // build a merged map from any CMap-looking streams (for simple single-font PDFs)
+    let mut fallback_cmap: HashMap<u16, char> = HashMap::new();
+    if font_cmaps.is_empty() {
+        for content in &all_streams {
+            if content.contains("beginbfchar") || content.contains("beginbfrange") {
+                parse_tounicode_cmap_u16(content, &mut fallback_cmap);
+            }
+        }
+        if !fallback_cmap.is_empty() {
+            tracing::debug!("[PDF:extract] Using fallback merged CMap with {} entries (no per-font association found)", fallback_cmap.len());
+        }
+    }
 
-    for content in &stream_contents {
-        // Skip CMap streams — they don't contain displayable text
+    let has_per_font = !font_cmaps.is_empty();
+    let has_fallback = !fallback_cmap.is_empty();
+
+    tracing::info!("[PDF:extract] CMap status for '{}': {} per-font maps, {} fallback entries",
+        file_name, font_cmaps.len(), fallback_cmap.len());
+
+    // --- Phase 3: Extract text from BT..ET blocks with font tracking ---
+    let mut all_texts: Vec<String> = Vec::new();
+
+    for content in &all_streams {
         if content.contains("beginbfchar") || content.contains("begincmap") {
             continue;
         }
-        // Skip streams without BT markers
         if !content.contains("BT") {
             continue;
         }
@@ -2631,9 +2723,10 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
         let mut i = 0;
         let mut in_bt = false;
         let mut line_texts: Vec<String> = Vec::new();
+        let mut current_font: Option<String> = None;
 
         while i < len {
-            // Detect BT (start of text block)
+            // Detect BT
             if !in_bt && i + 1 < len && chars[i] == 'B' && chars[i + 1] == 'T'
                 && (i == 0 || chars[i - 1].is_whitespace())
                 && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n' || chars[i + 2] == '\r')
@@ -2643,7 +2736,7 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 continue;
             }
 
-            // Detect ET (end of text block)
+            // Detect ET
             if in_bt && i + 1 < len && chars[i] == 'E' && chars[i + 1] == 'T'
                 && (i == 0 || chars[i - 1].is_whitespace())
                 && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n' || chars[i + 2] == '\r')
@@ -2657,40 +2750,46 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 continue;
             }
 
-            // Inside BT..ET, extract parenthesized strings
-            if in_bt && chars[i] == '(' {
-                let mut depth = 1;
-                let mut raw_chars: Vec<char> = Vec::new();
-                i += 1;
-                while i < len && depth > 0 {
-                    if chars[i] == '(' && (i == 0 || chars[i - 1] != '\\') { depth += 1; }
-                    else if chars[i] == ')' && (i == 0 || chars[i - 1] != '\\') {
-                        depth -= 1;
-                        if depth == 0 { break; }
-                    }
-                    if chars[i] == '\\' && i + 1 < len {
-                        i += 1;
-                        match chars[i] {
-                            'n' => raw_chars.push('\n'),
-                            'r' => raw_chars.push('\r'),
-                            't' => raw_chars.push('\t'),
-                            '(' => raw_chars.push('('),
-                            ')' => raw_chars.push(')'),
-                            '\\' => raw_chars.push('\\'),
-                            _ => raw_chars.push(chars[i]),
-                        }
-                    } else {
-                        raw_chars.push(chars[i]);
-                    }
-                    i += 1;
+            // Inside BT..ET, detect Tf operator to track current font: /F1 12 Tf
+            if in_bt && chars[i] == '/' {
+                // Parse font name: /F1, /F2, /TT0, etc.
+                let mut name = String::new();
+                let mut j = i + 1;
+                while j < len && !chars[j].is_whitespace() {
+                    name.push(chars[j]);
+                    j += 1;
                 }
+                // Check if this is followed by "size Tf"
+                let remaining: String = chars[j..std::cmp::min(j + 30, len)].iter().collect();
+                let tf_tokens: Vec<&str> = remaining.split_whitespace().take(2).collect();
+                if tf_tokens.len() >= 2 && tf_tokens[1] == "Tf" {
+                    current_font = Some(name.clone());
+                    // Skip past the Tf
+                    i = j;
+                    // Skip past "size Tf"
+                    while i < len && chars[i] != 'T' { i += 1; }
+                    if i + 1 < len && chars[i] == 'T' && chars[i + 1] == 'f' { i += 2; }
+                    continue;
+                }
+            }
 
-                // Apply CMap unicode mapping if available
-                let text: String = if has_cmap {
+            // Extract parenthesized strings and apply per-font CMap
+            if in_bt && chars[i] == '(' {
+                let raw_chars = extract_paren_string(&chars, &mut i, len);
+
+                let active_cmap = if has_per_font {
+                    current_font.as_ref().and_then(|f| font_cmaps.get(f))
+                } else if has_fallback {
+                    Some(&fallback_cmap)
+                } else {
+                    None
+                };
+
+                let text: String = if let Some(cmap) = active_cmap {
                     raw_chars.iter().map(|&c| {
                         let code = c as u32;
-                        if code <= 0xFF {
-                            unicode_map.get(&(code as u8)).copied().unwrap_or(c)
+                        if code <= 0xFFFF {
+                            cmap.get(&(code as u16)).copied().unwrap_or(c)
                         } else {
                             c
                         }
@@ -2702,32 +2801,24 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 if !text.is_empty() {
                     line_texts.push(text);
                 }
+                continue;
             }
 
-            // Handle hex strings <4F6E65> inside BT..ET
+            // Handle hex strings
             if in_bt && chars[i] == '<' && (i + 1 < len && chars[i + 1] != '<') {
-                let mut hex = String::new();
-                i += 1;
-                while i < len && chars[i] != '>' {
-                    if chars[i].is_ascii_hexdigit() {
-                        hex.push(chars[i]);
-                    }
-                    i += 1;
-                }
-                let bytes: Vec<u8> = (0..hex.len())
-                    .step_by(2)
-                    .filter_map(|j| {
-                        if j + 2 <= hex.len() {
-                            u8::from_str_radix(&hex[j..j + 2], 16).ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                // Apply CMap mapping to hex string bytes too
-                let decoded: String = if has_cmap {
+                let bytes = extract_hex_string(&chars, &mut i, len);
+
+                let active_cmap = if has_per_font {
+                    current_font.as_ref().and_then(|f| font_cmaps.get(f))
+                } else if has_fallback {
+                    Some(&fallback_cmap)
+                } else {
+                    None
+                };
+
+                let decoded: String = if let Some(cmap) = active_cmap {
                     bytes.iter().map(|&b| {
-                        unicode_map.get(&b).copied().unwrap_or(b as char)
+                        cmap.get(&(b as u16)).copied().unwrap_or(b as char)
                     }).collect()
                 } else {
                     String::from_utf8_lossy(&bytes).to_string()
@@ -2735,6 +2826,7 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 if !decoded.trim().is_empty() {
                     line_texts.push(decoded);
                 }
+                continue;
             }
 
             i += 1;
@@ -2747,7 +2839,7 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
 
     tracing::debug!("[PDF:extract] Extracted {} text lines from BT/ET blocks", all_texts.len());
 
-    // --- Phase 3: Fallback if no BT/ET text found ---
+    // --- Phase 4: Fallback if no BT/ET text found ---
     if all_texts.is_empty() {
         tracing::debug!("[PDF:extract] No BT/ET text found, trying ASCII fallback");
         let mut current = String::new();
@@ -2779,16 +2871,88 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
     }
 
     if all_texts.is_empty() {
-        tracing::warn!("[PDF:extract] No text extracted from '{}' ({} bytes) — PDF may use unsupported encoding (CID/Type3 fonts)", file_name, data.len());
+        tracing::warn!("[PDF:extract] No text extracted from '{}' ({} bytes)", file_name, data.len());
         None
     } else {
         let result = all_texts.join("\n");
-        tracing::info!("[PDF:extract] Extracted {} chars ({} lines) from '{}'", result.len(), all_texts.len(), file_name);
-        // Log a sample to verify encoding is correct
-        let sample: String = result.chars().take(200).collect();
-        tracing::debug!("[PDF:extract] Sample text from '{}': {:?}", file_name, sample);
+        let sample: String = result.chars().take(300).collect();
+        tracing::info!("[PDF:extract] Extracted {} chars ({} lines) from '{}'. Sample: {:?}",
+            result.len(), all_texts.len(), file_name, sample);
         Some(result)
     }
+}
+
+/// Extract a parenthesized string from PDF content, handling escapes.
+/// Advances `i` past the closing paren.
+fn extract_paren_string(chars: &[char], i: &mut usize, len: usize) -> Vec<char> {
+    let mut depth = 1;
+    let mut result = Vec::new();
+    *i += 1; // skip opening '('
+    while *i < len && depth > 0 {
+        if chars[*i] == '(' && (*i == 0 || chars[*i - 1] != '\\') { depth += 1; }
+        else if chars[*i] == ')' && (*i == 0 || chars[*i - 1] != '\\') {
+            depth -= 1;
+            if depth == 0 { *i += 1; break; }
+        }
+        if chars[*i] == '\\' && *i + 1 < len {
+            *i += 1;
+            match chars[*i] {
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                '(' => result.push('('),
+                ')' => result.push(')'),
+                '\\' => result.push('\\'),
+                _ => result.push(chars[*i]),
+            }
+        } else {
+            result.push(chars[*i]);
+        }
+        *i += 1;
+    }
+    result
+}
+
+/// Extract a hex string <XX XX> from PDF content, returning raw bytes.
+/// Advances `i` past the closing '>'.
+fn extract_hex_string(chars: &[char], i: &mut usize, len: usize) -> Vec<u8> {
+    let mut hex = String::new();
+    *i += 1; // skip '<'
+    while *i < len && chars[*i] != '>' {
+        if chars[*i].is_ascii_hexdigit() {
+            hex.push(chars[*i]);
+        }
+        *i += 1;
+    }
+    if *i < len { *i += 1; } // skip '>'
+    (0..hex.len())
+        .step_by(2)
+        .filter_map(|j| {
+            if j + 2 <= hex.len() {
+                u8::from_str_radix(&hex[j..j + 2], 16).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Find the object number from a string region before "stream".
+/// Looks for "N 0 obj" pattern.
+fn parse_obj_number_before(dict_str: &str) -> Option<u32> {
+    // Search backward for "N 0 obj"
+    if let Some(obj_pos) = dict_str.rfind(" 0 obj") {
+        let before = &dict_str[..obj_pos];
+        // Find the last whitespace or newline before the number
+        if let Some(num_start) = before.rfind(|c: char| c.is_whitespace() || c == '\n' || c == '\r') {
+            let num_str = before[num_start + 1..].trim();
+            return num_str.parse::<u32>().ok();
+        } else {
+            // Number starts at beginning of string
+            return before.trim().parse::<u32>().ok();
+        }
+    }
+    None
 }
 
 /// Find a byte pattern in a slice, returning the offset of the first match
@@ -2796,18 +2960,8 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Parse a /ToUnicode CMap stream and populate a byte → char mapping.
-/// Returns the number of entries added.
-///
-/// CMap format example:
-///   beginbfchar
-///   <20> <0053>    ← byte 0x20 maps to Unicode U+0053 ('S')
-///   <21> <0068>    ← byte 0x21 maps to Unicode U+0068 ('h')
-///   endbfchar
-///   beginbfrange
-///   <22> <25> <0069>   ← bytes 0x22..0x25 map to U+0069..U+006C
-///   endbfrange
-fn parse_tounicode_cmap(content: &str, map: &mut std::collections::HashMap<u8, char>) -> usize {
+/// Parse a /ToUnicode CMap stream into a u16 → char mapping (supports multi-byte codes).
+fn parse_tounicode_cmap_u16(content: &str, map: &mut std::collections::HashMap<u16, char>) -> usize {
     let mut added = 0usize;
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -2825,9 +2979,9 @@ fn parse_tounicode_cmap(content: &str, map: &mut std::collections::HashMap<u8, c
                 let tokens: Vec<&str> = l.split_whitespace().collect();
                 if tokens.len() >= 2 {
                     if let (Some(src), Some(dst)) = (parse_cmap_hex(tokens[0]), parse_cmap_hex(tokens[1])) {
-                        if src <= 0xFF {
+                        if src <= 0xFFFF {
                             if let Some(c) = char::from_u32(dst) {
-                                map.insert(src as u8, c);
+                                map.insert(src as u16, c);
                                 added += 1;
                             }
                         }
@@ -2854,10 +3008,10 @@ fn parse_tounicode_cmap(content: &str, map: &mut std::collections::HashMap<u8, c
                             let hex_values: Vec<&str> = rest.split_whitespace().collect();
                             for (offset, hex_val) in hex_values.iter().enumerate() {
                                 let src = range_start + offset as u32;
-                                if src > 0xFF || src > range_end { break; }
+                                if src > 0xFFFF || src > range_end { break; }
                                 if let Some(dst) = parse_cmap_hex(hex_val) {
                                     if let Some(c) = char::from_u32(dst) {
-                                        map.insert(src as u8, c);
+                                        map.insert(src as u16, c);
                                         added += 1;
                                     }
                                 }
@@ -2872,9 +3026,9 @@ fn parse_tounicode_cmap(content: &str, map: &mut std::collections::HashMap<u8, c
                                 for offset in 0..=(range_end - range_start) {
                                     let src = range_start + offset;
                                     let dst = uni_start + offset;
-                                    if src <= 0xFF {
+                                    if src <= 0xFFFF {
                                         if let Some(c) = char::from_u32(dst) {
-                                            map.insert(src as u8, c);
+                                            map.insert(src as u16, c);
                                             added += 1;
                                         }
                                     }
