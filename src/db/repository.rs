@@ -1652,6 +1652,15 @@ impl Repository {
         Ok(result.0)
     }
 
+    /// Check if a time entry with the given UUID exists
+    pub async fn time_entry_exists(&self, uuid: &str) -> anyhow::Result<bool> {
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM time_entries WHERE uuid = ?")
+            .bind(uuid)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(result.0 > 0)
+    }
+
     /// Get active time entries (currently clocked in)
     pub async fn get_active_time_entries(&self) -> anyhow::Result<Vec<TimeEntryRecord>> {
         let entries = sqlx::query_as::<_, TimeEntryRecord>(

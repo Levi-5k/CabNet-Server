@@ -96,6 +96,9 @@ pub fn create_router(state: SharedState) -> Router {
         // Time Rounding Config
         .route("/api/settings/time-rounding", get(handlers::get_time_rounding))
         .route("/api/settings/time-rounding", put(handlers::set_time_rounding))
+        // Auto Break Config
+        .route("/api/settings/auto-break", get(handlers::get_auto_break))
+        .route("/api/settings/auto-break", put(handlers::set_auto_break))
         // Location Pings (GPS tracking)
         .route("/api/location-pings", post(handlers::sync_location_pings))
         .route("/api/location-pings", get(handlers::get_location_pings))

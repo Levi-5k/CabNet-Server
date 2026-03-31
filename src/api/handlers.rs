@@ -1861,6 +1861,61 @@ pub async fn sync_time_entries(
         }
     }
 
+    // Auto-break: if enabled, insert a break for work entries that exceed the threshold
+    let auto_break = match state.repo.get_setting(AUTO_BREAK_SETTING_KEY).await {
+        Ok(Some(json_str)) => serde_json::from_str::<AutoBreakConfig>(&json_str).unwrap_or_default(),
+        _ => AutoBreakConfig::default(),
+    };
+
+    if auto_break.enabled {
+        let threshold_ms = auto_break.threshold_hours as i64 * 3_600_000;
+        let break_ms = auto_break.break_minutes as i64 * 60_000;
+
+        for entry in &request.entries {
+            // Only applies to work entries (not breaks) that have a clock_out
+            if entry.is_break.unwrap_or(false) {
+                continue;
+            }
+            let clock_out_ms = match entry.clock_out {
+                Some(co) => co,
+                None => continue,
+            };
+
+            let worked_ms = clock_out_ms - entry.clock_in;
+            if worked_ms < threshold_ms {
+                continue;
+            }
+
+            // Check if an auto-break already exists for this entry
+            let auto_break_id = format!("auto-break-{}", entry.id);
+            if state.repo.time_entry_exists(&auto_break_id).await.unwrap_or(true) {
+                continue;
+            }
+
+            // Insert a 30-min unpaid break starting at the threshold point
+            let break_start = entry.clock_in + threshold_ms;
+            let break_end = break_start + break_ms;
+
+            let break_entry = TimeEntryInput {
+                id: auto_break_id.clone(),
+                device_id: entry.device_id.clone(),
+                customer_name: entry.customer_name.clone(),
+                job_name: entry.job_name.clone(),
+                job_id: entry.job_id.clone(),
+                clock_in: break_start,
+                clock_out: Some(break_end),
+                note: Some(format!("Auto {}min break - worked over {}hrs", auto_break.break_minutes, auto_break.threshold_hours)),
+                is_break: Some(true),
+                is_paid: Some(false),
+            };
+
+            match state.repo.upsert_time_entry(&break_entry).await {
+                Ok(_) => tracing::info!("Auto-break inserted for entry {}", entry.id),
+                Err(e) => tracing::warn!("Failed to insert auto-break for {}: {}", entry.id, e),
+            }
+        }
+    }
+
     let count = synced_ids.len();
     Ok(Json(ApiResponse::success_with_message(
         SyncTimeEntriesResponse { synced_ids },
@@ -2282,6 +2337,68 @@ pub async fn set_room_items(
     tracing::info!("Room items updated: {:?}", items);
 
     Ok(Json(ApiResponse::success(items)))
+}
+
+// ==================== AUTO BREAK CONFIG ====================
+
+const AUTO_BREAK_SETTING_KEY: &str = "auto_break";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoBreakConfig {
+    pub enabled: bool,
+    pub threshold_hours: i32,
+    pub break_minutes: i32,
+}
+
+impl Default for AutoBreakConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_hours: 8,
+            break_minutes: 30,
+        }
+    }
+}
+
+/// GET /api/settings/auto-break - Get the auto break config
+pub async fn get_auto_break(
+    State(state): State<SharedState>,
+) -> Result<Json<ApiResponse<AutoBreakConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let config = match state.repo.get_setting(AUTO_BREAK_SETTING_KEY).await {
+        Ok(Some(json_str)) => {
+            serde_json::from_str::<AutoBreakConfig>(&json_str)
+                .unwrap_or_default()
+        }
+        _ => AutoBreakConfig::default(),
+    };
+
+    Ok(Json(ApiResponse::success(config)))
+}
+
+/// PUT /api/settings/auto-break - Update the auto break config
+pub async fn set_auto_break(
+    State(state): State<SharedState>,
+    Json(config): Json<AutoBreakConfig>,
+) -> Result<Json<ApiResponse<AutoBreakConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    let config = AutoBreakConfig {
+        enabled: config.enabled,
+        threshold_hours: config.threshold_hours.clamp(1, 24),
+        break_minutes: config.break_minutes.clamp(1, 120),
+    };
+
+    let json_str = serde_json::to_string(&config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    state.repo.set_setting(AUTO_BREAK_SETTING_KEY, &json_str).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    tracing::info!("Auto break config updated: {:?}", config);
+
+    Ok(Json(ApiResponse::success(config)))
 }
 
 // ==================== TIME ROUNDING CONFIG ====================
