@@ -210,6 +210,7 @@ pub struct UpdateJobRequest {
     pub priority: Option<String>,
     pub expected_count: Option<i32>,
     pub due_date: Option<Option<String>>,
+    pub address: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -749,6 +750,7 @@ pub async fn update_job(
             request.priority.as_deref(),
             request.expected_count,
             request.due_date.as_ref().map(|v| v.as_deref()),
+            request.address.as_ref().map(|v| v.as_deref()),
         )
         .await
         .map_err(|e| {
@@ -1538,6 +1540,7 @@ async fn apply_change(
                 data.priority.as_deref(),
                 data.expected_count,
                 data.due_date.as_ref().map(|v| v.as_deref()),
+                None,
             ).await.map_err(|e| e.to_string())?;
             Ok("Job updated".to_string())
         }
@@ -2580,6 +2583,17 @@ pub async fn upload_job_file(
         } else {
             tracing::warn!("[PDF] Lading file '{}' has no extracted text — cannot parse tickets", file_name);
         }
+
+        // Extract address from BOL and set on job if not already set
+        if let Some(ref text) = extracted_text {
+            if let Some(address) = extract_bol_address(text) {
+                match state.repo.set_job_address_if_empty(&job_id, &address).await {
+                    Ok(true) => tracing::info!("[PDF] Set job address from BOL: '{}'", address),
+                    Ok(false) => tracing::debug!("[PDF] Job already has an address, not overwriting"),
+                    Err(e) => tracing::warn!("[PDF] Failed to set job address: {}", e),
+                }
+            }
+        }
     } else {
         tracing::debug!("[PDF] File '{}' not a lading PDF, skipping ticket parsing", file_name);
     }
@@ -3519,6 +3533,66 @@ fn parse_cmap_hex(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
+/// Extract a delivery address from BOL text (lines before the first section header).
+/// BOLs typically have the delivery address in the header area before "HARDWARE TICKETS", etc.
+fn extract_bol_address(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.split('\n').map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let mut address_lines: Vec<String> = Vec::new();
+
+    for line in &lines {
+        let upper = line.to_uppercase();
+        // Stop at the first section header
+        if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING")
+            || upper.contains("ADVICE") || upper.contains("BILL OF LADING")
+            || (upper.contains("PRIORITY") && upper.contains("TICKET"))
+            || upper.contains("REPORT REF") || upper.contains("RUN DATE")
+        {
+            break;
+        }
+
+        // Look for lines that contain address-like words
+        let lower = line.to_lowercase();
+        let has_address_indicator = lower.contains("loop") || lower.contains("street")
+            || lower.contains(" ave ") || lower.contains("blvd") || lower.contains("drive")
+            || lower.contains("road") || lower.contains("lane") || lower.contains(" st ")
+            || lower.contains(" ct ") || lower.contains(" dr ") || lower.contains(" nw")
+            || lower.contains(" sw") || lower.contains(" ne") || lower.contains(" se,")
+            || lower.contains("unit ") || lower.contains("suite");
+
+        // Also match lines that look like "city, state zip" (e.g. "Albuquerque, NM 87120")
+        let has_city_state_zip = {
+            let re_like = lower.contains(',') && line.chars().filter(|c| c.is_ascii_digit()).count() >= 5
+                && line.len() >= 10;
+            re_like
+        };
+
+        // Match lines starting with a number followed by text (street address pattern: "123 Main St")
+        let starts_with_street_number = {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.len() >= 2 && parts[0].len() <= 6
+                && parts[0].chars().all(|c| c.is_ascii_digit())
+                && parts[1].chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+        };
+
+        if has_address_indicator || has_city_state_zip || starts_with_street_number {
+            // Filter out garbled text
+            let alpha = line.chars().filter(|c| c.is_ascii_alphabetic()).count();
+            if (alpha as f32 / line.len().max(1) as f32) >= 0.4 {
+                address_lines.push(line.to_string());
+            }
+        }
+    }
+
+    if address_lines.is_empty() {
+        return None;
+    }
+
+    // Combine into a single address string
+    let address = address_lines.join(", ");
+    tracing::info!("[PDF:address] Extracted address from BOL: '{}'", address);
+    Some(address)
+}
+
 /// Parse lading/shipping PDF text into ticket records
 /// Returns tuples of (job_id, file_uuid, ticket_number, description, room, qty, section)
 fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
@@ -3961,6 +4035,15 @@ pub async fn reparse_job_file(
 
     tracing::info!("[PDF:reparse] Inserted {} new tickets from '{}' (deleted {} old)", inserted, file_name, deleted);
 
+    // Re-extract address from BOL
+    if let Some(address) = extract_bol_address(&text) {
+        match state.repo.set_job_address_if_empty(&job_id, &address).await {
+            Ok(true) => tracing::info!("[PDF:reparse] Set job address from BOL: '{}'", address),
+            Ok(false) => tracing::debug!("[PDF:reparse] Job already has address, not overwriting"),
+            Err(e) => tracing::warn!("[PDF:reparse] Failed to set job address: {}", e),
+        }
+    }
+
     Ok(Json(ApiResponse::success(ReparseResponse {
         tickets_deleted: deleted,
         tickets_inserted: inserted as u64,
@@ -4017,4 +4100,17 @@ pub async fn get_ticket_description(
 #[derive(Debug, Deserialize)]
 pub struct TicketDescriptionQuery {
     pub job_id: Option<String>,
+}
+
+// Public wrappers for GUI access
+pub fn extract_pdf_text_pub(data: &[u8], file_name: &str) -> Option<String> {
+    extract_pdf_text(data, file_name)
+}
+
+pub fn parse_lading_tickets_pub(text: &str, job_id: &str, file_uuid: &str, file_name: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
+    parse_lading_tickets(text, job_id, file_uuid, file_name)
+}
+
+pub fn extract_bol_address_pub(text: &str) -> Option<String> {
+    extract_bol_address(text)
 }

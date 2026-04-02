@@ -468,6 +468,29 @@ impl Repository {
             .await?)
     }
 
+    /// Set the address on a job, identified by numeric id or uuid string.
+    /// Only sets if the job currently has no address.
+    pub async fn set_job_address_if_empty(&self, job_id_str: &str, address: &str) -> anyhow::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        // Try numeric ID first, then UUID
+        let result = if let Ok(id) = job_id_str.parse::<i64>() {
+            sqlx::query("UPDATE jobs SET address = ?, updated_at = ? WHERE id = ? AND (address IS NULL OR address = '')")
+                .bind(address)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+        } else {
+            sqlx::query("UPDATE jobs SET address = ?, updated_at = ? WHERE uuid = ? AND (address IS NULL OR address = '')")
+                .bind(address)
+                .bind(&now)
+                .bind(job_id_str)
+                .execute(&self.pool)
+                .await?
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Update job with all editable fields
     pub async fn update_job_details(
         &self,
@@ -481,6 +504,7 @@ impl Repository {
         priority: Option<&str>,
         expected_count: Option<i32>,
         due_date: Option<Option<&str>>,
+        address: Option<Option<&str>>,
     ) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
         let mut set_parts = vec!["updated_at = ?".to_string()];
@@ -493,6 +517,7 @@ impl Repository {
         if priority.is_some() { set_parts.push("priority = ?".to_string()); }
         if expected_count.is_some() { set_parts.push("expected_count = ?".to_string()); }
         if due_date.is_some() { set_parts.push("due_date = ?".to_string()); }
+        if address.is_some() { set_parts.push("address = ?".to_string()); }
 
         let query = format!("UPDATE jobs SET {} WHERE id = ?", set_parts.join(", "));
         let mut q = sqlx::query(&query);
@@ -506,6 +531,7 @@ impl Repository {
         if let Some(v) = priority { q = q.bind(v); }
         if let Some(v) = expected_count { q = q.bind(v); }
         if let Some(v) = due_date { q = q.bind(v); }
+        if let Some(v) = address { q = q.bind(v); }
         q = q.bind(id);
         q.execute(&self.pool).await?;
         Ok(())
@@ -513,7 +539,7 @@ impl Repository {
 
     /// Update job (legacy compat)
     pub async fn update_job(&self, id: i64, name: &str, status: &str) -> anyhow::Result<()> {
-        self.update_job_details(id, Some(name), Some(status), None, None, None, None, None, None, None).await
+        self.update_job_details(id, Some(name), Some(status), None, None, None, None, None, None, None, None).await
     }
 
     /// Get scan count for a specific job
@@ -2537,6 +2563,8 @@ impl Repository {
 
     pub async fn insert_lading_tickets(&self, tickets: &[(String, String, String, Option<String>, Option<String>, i32, Option<String>)]) -> anyhow::Result<usize> {
         // Each tuple: (job_id, job_file_uuid, ticket_number, description, room, qty, section)
+        // Use a transaction for batch efficiency (supports 600+ tickets)
+        let mut tx = self.pool.begin().await?;
         let mut count = 0;
         for (job_id, file_uuid, ticket, desc, room, qty, section) in tickets {
             sqlx::query(
@@ -2550,10 +2578,11 @@ impl Repository {
             .bind(room.as_deref())
             .bind(*qty)
             .bind(section.as_deref())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             count += 1;
         }
+        tx.commit().await?;
         Ok(count)
     }
 

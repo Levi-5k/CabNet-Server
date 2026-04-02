@@ -61,6 +61,7 @@ pub struct Job {
     pub due_date: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub address: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
 }
@@ -85,6 +86,7 @@ pub struct JobInput {
     pub notes: Option<String>,
     pub priority: Option<String>,
     pub due_date: Option<i64>,
+    pub address: Option<String>,
 }
 
 /// Device record

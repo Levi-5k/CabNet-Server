@@ -601,5 +601,11 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
 
     tracing::info!("Database migrations completed");
+
+    // Migration: Add address column to jobs table
+    let _ = sqlx::query("ALTER TABLE jobs ADD COLUMN address TEXT")
+        .execute(pool)
+        .await;
+
     Ok(())
 }

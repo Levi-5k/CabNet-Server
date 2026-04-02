@@ -22,6 +22,10 @@ pub struct JobsTab {
     pub edit_priority: String,
     pub edit_customer: String,
     pub edit_notes: String,
+    pub edit_address: String,
+    /// Pending PDF upload for a job (job_id, file_path)
+    pub pending_upload: Option<(i64, String, std::path::PathBuf)>,
+    pub upload_status: Option<String>,
 }
 
 impl Default for JobsTab {
@@ -42,6 +46,9 @@ impl Default for JobsTab {
             edit_priority: String::new(),
             edit_customer: String::new(),
             edit_notes: String::new(),
+            edit_address: String::new(),
+            pending_upload: None,
+            upload_status: None,
         }
     }
 }
@@ -152,6 +159,7 @@ impl JobsTab {
                                 notes: None,
                                 priority: Some("NORMAL".to_string()),
                                 due_date: None,
+                                address: None,
                             };
 
                             let state_c = state.clone();
@@ -184,6 +192,9 @@ impl JobsTab {
                     })
                     || j.customer_name.as_ref().map_or(false, |c| {
                         c.to_lowercase().contains(&self.search_query.to_lowercase())
+                    })
+                    || j.address.as_ref().map_or(false, |a| {
+                        a.to_lowercase().contains(&self.search_query.to_lowercase())
                     });
                 status_match && search_match
             })
@@ -345,6 +356,21 @@ impl JobsTab {
                                         }
                                     }
 
+                                    if let Some(address) = &job.address {
+                                        if !address.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Address:")
+                                                        .size(10.0)
+                                                        .color(muted),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(address).size(11.0),
+                                                );
+                                            });
+                                        }
+                                    }
+
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new("Expected:")
@@ -399,6 +425,8 @@ impl JobsTab {
                                                 job.customer_name.clone().unwrap_or_default();
                                             self.edit_notes =
                                                 job.notes.clone().unwrap_or_default();
+                                            self.edit_address =
+                                                job.address.clone().unwrap_or_default();
                                             self.editing_job = Some(job_id);
                                         }
 
@@ -428,7 +456,89 @@ impl JobsTab {
                                             self.expanded_jobs.remove(&job_id);
                                             needs_refresh = true;
                                         }
+
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("📄 Upload PDF").size(11.0),
+                                                )
+                                                .fill(egui::Color32::from_rgb(30, 100, 180))
+                                                .rounding(egui::Rounding::same(4.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .set_title("Select PDF to upload")
+                                                .add_filter("PDF Files", &["pdf"])
+                                                .pick_file()
+                                            {
+                                                let file_name_str = path.file_name()
+                                                    .map(|n| n.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|| "file.pdf".to_string());
+                                                self.pending_upload = Some((job_id, file_name_str, path));
+                                            }
+                                        }
                                     });
+
+                                    // Process pending upload for this job
+                                    if let Some((upload_job_id, ref _fname, ref _path)) = self.pending_upload {
+                                        if upload_job_id == job_id {
+                                            let (_, file_name_str, path) = self.pending_upload.take().unwrap();
+                                            match std::fs::read(&path) {
+                                                Ok(file_bytes) => {
+                                                    let job_uuid = job.uuid.clone();
+                                                    let state_c = state.clone();
+                                                    let result = runtime.block_on(async {
+                                                        let state_c = state_c.read().await;
+                                                        let uuid = uuid::Uuid::new_v4().to_string();
+                                                        let extracted = crate::api::handlers::extract_pdf_text_pub(&file_bytes, &file_name_str);
+
+                                                        state_c.repo.insert_job_file(
+                                                            &uuid, &job_uuid, &file_name_str, "application/pdf",
+                                                            &file_bytes, extracted.as_deref(), None, Some("Server GUI"),
+                                                        ).await?;
+
+                                                        // Parse lading tickets if BOL
+                                                        let lower = file_name_str.to_lowercase();
+                                                        let is_lading = lower.contains("lading") || lower.contains("bol");
+                                                        if is_lading {
+                                                            if let Some(ref text) = extracted {
+                                                                let tickets = crate::api::handlers::parse_lading_tickets_pub(text, &job_uuid, &uuid, &file_name_str);
+                                                                if !tickets.is_empty() {
+                                                                    let _ = state_c.repo.insert_lading_tickets(&tickets).await;
+                                                                    tracing::info!("[GUI] Parsed {} tickets from '{}'", tickets.len(), file_name_str);
+                                                                }
+                                                                // Extract address
+                                                                if let Some(address) = crate::api::handlers::extract_bol_address_pub(text) {
+                                                                    let _ = state_c.repo.set_job_address_if_empty(&job_uuid, &address).await;
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok::<(), anyhow::Error>(())
+                                                    });
+                                                    match result {
+                                                        Ok(_) => {
+                                                            self.upload_status = Some(format!("✓ Uploaded '{}'", file_name_str));
+                                                            needs_refresh = true;
+                                                        }
+                                                        Err(e) => self.upload_status = Some(format!("✗ Upload failed: {}", e)),
+                                                    }
+                                                }
+                                                Err(e) => self.upload_status = Some(format!("✗ Failed to read file: {}", e)),
+                                            }
+                                        }
+                                    }
+
+                                    // Show upload status
+                                    if let Some(ref status_msg) = self.upload_status {
+                                        ui.label(egui::RichText::new(status_msg).size(10.0).color(
+                                            if status_msg.starts_with('✓') {
+                                                egui::Color32::from_rgb(76, 175, 80)
+                                            } else {
+                                                egui::Color32::from_rgb(244, 67, 54)
+                                            }
+                                        ));
+                                    }
 
                                     // Inline edit panel
                                     if self.editing_job == Some(job_id) {
@@ -555,6 +665,19 @@ impl JobsTab {
                                                     .desired_rows(2),
                                             );
                                             ui.end_row();
+
+                                            ui.label(
+                                                egui::RichText::new("Address:")
+                                                    .size(11.0)
+                                                    .color(muted),
+                                            );
+                                            ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut self.edit_address,
+                                                )
+                                                .desired_width(160.0),
+                                            );
+                                            ui.end_row();
                                         });
 
                                         ui.add_space(6.0);
@@ -577,6 +700,7 @@ impl JobsTab {
                                                 let customer = self.edit_customer.clone();
                                                 let notes = self.edit_notes.clone();
                                                 let priority = self.edit_priority.clone();
+                                                let address = self.edit_address.clone();
 
                                                 let state_c = state.clone();
                                                 runtime.block_on(async {
@@ -610,6 +734,11 @@ impl JobsTab {
                                                             Some(&priority),
                                                             None,
                                                             None,
+                                                            Some(if address.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(address.as_str())
+                                                            }),
                                                         )
                                                         .await;
                                                 });
