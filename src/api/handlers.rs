@@ -2558,13 +2558,12 @@ pub async fn upload_job_file(
         job_id, file_name, file_size,
         extracted_text.as_ref().map(|t| t.len()).unwrap_or(0));
 
-    // If this is a lading/shipping/packing PDF, parse ticket data
+    // If this is a bill of lading PDF, parse ticket data
     let lower_name = file_name.to_lowercase();
-    let is_lading = lower_name.contains("lading") || lower_name.contains("shipping")
-        || lower_name.contains("packing") || lower_name.contains("bol");
+    let is_lading = lower_name.contains("lading") || lower_name.contains("bol");
 
     if is_lading {
-        tracing::info!("[PDF] File '{}' detected as lading/shipping PDF, attempting ticket parsing", file_name);
+        tracing::info!("[PDF] File '{}' detected as bill of lading PDF, attempting ticket parsing", file_name);
         if let Some(ref text) = extracted_text {
             let tickets = parse_lading_tickets(text, &job_id, &uuid, &file_name);
             if !tickets.is_empty() {
@@ -3536,9 +3535,18 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
     tracing::debug!("[PDF:tickets] Parsing {} lines ({} non-empty) of text from '{}' for job {}",
         raw_line_count, total_lines, file_name, job_id);
 
-    // Helper: parse a digit-only string as room(3)+qty(1)
+    // Helper: parse a digit-only string as room(3)+qty(1-2)
     fn parse_room_qty(s: &str) -> Option<(String, i32)> {
         if s.len() >= 4 && s.chars().all(|c| c.is_ascii_digit()) {
+            // Try room(3) + qty(2) first for 5+ digit strings, then room(3) + qty(1)
+            if s.len() >= 5 {
+                let split2 = s.len() - 2;
+                if let (Ok(room_num), Ok(q)) = (s[..split2].parse::<i32>(), s[split2..].parse::<i32>()) {
+                    if room_num >= 100 && room_num <= 999 && q >= 1 && q <= 99 {
+                        return Some((s[..split2].to_string(), q));
+                    }
+                }
+            }
             let split = s.len() - 1;
             if let (Ok(room_num), Ok(q)) = (s[..split].parse::<i32>(), s[split..].parse::<i32>()) {
                 if room_num >= 100 && room_num <= 999 && q >= 1 && q <= 9 {
@@ -3549,13 +3557,32 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
         None
     }
 
+    // Helper: check if text looks like a street address
+    fn has_address_words(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        lower.contains("loop") || lower.contains("street") || lower.contains(" ave ")
+            || lower.contains("blvd") || lower.contains("unit ") || lower.contains("suite")
+            || lower.contains(" nw") || lower.contains(" sw") || lower.contains(" ne,")
+            || lower.contains(" se,") || lower.contains("cynthia") || lower.contains("drive")
+            || lower.contains("road") || lower.contains("lane") || lower.contains(" st ")
+            || lower.contains(" ct ") || lower.contains(" dr ")
+    }
+
+    // Helper: check if text is garbled (low alphabetic ratio)
+    fn is_garbled_text(text: &str, threshold: f32) -> bool {
+        let alpha = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        (alpha as f32 / text.len().max(1) as f32) < threshold
+    }
+
     let mut i = 0;
     while i < total_lines {
         let line = lines[i];
 
         // Detect section headers like "HARDWARE TICKETS", "Shipping Advice", etc.
         let upper = line.to_uppercase();
-        if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING") {
+        if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING")
+            || upper.contains("ADVICE") || upper.contains("BILL OF LADING")
+        {
             current_section = Some(line.to_string());
             seen_section_header = true;
             tracing::debug!("[PDF:tickets] Section header detected: '{}'", line);
@@ -3738,41 +3765,22 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
             // *** SINGLE-LINE FORMAT: ticket number + description on same line ***
 
             // Filter out bogus "ticket numbers" that are actually zip codes or street addresses
-            let rest_of_line = parts[1..].join(" ").to_lowercase();
-            // 5-digit numbers not starting with 0 are likely zip codes when followed by garbled/address text
+            let rest_of_line = parts[1..].join(" ");
             if first.len() == 5 && !first.starts_with('0') {
-                let has_address_word = rest_of_line.contains("loop") || rest_of_line.contains("street")
-                    || rest_of_line.contains(" ave ") || rest_of_line.contains("blvd")
-                    || rest_of_line.contains("unit ") || rest_of_line.contains("suite")
-                    || rest_of_line.contains(" nw") || rest_of_line.contains(" sw")
-                    || rest_of_line.contains(" ne,") || rest_of_line.contains(" se,");
-                // Also check for garbled text: high ratio of non-alphabetic chars
-                let alpha_count = rest_of_line.chars().filter(|c| c.is_ascii_alphabetic()).count();
-                let total_count = rest_of_line.len().max(1);
-                let is_garbled = (alpha_count as f32 / total_count as f32) < 0.5;
-                if has_address_word || is_garbled {
+                if has_address_words(&rest_of_line) || is_garbled_text(&rest_of_line, 0.5) {
                     skipped_lines += 1;
                     i += 1;
                     continue;
                 }
             }
-            // 3-digit numbers followed by address words ("230 Cynthia Loop NW")
+            // 3-4 digit numbers followed by address words ("230 Cynthia Loop NW")
             if first.len() <= 4 && !first.starts_with('0') {
-                let has_address_word = rest_of_line.contains("loop") || rest_of_line.contains("street")
-                    || rest_of_line.contains(" ave ") || rest_of_line.contains("blvd")
-                    || rest_of_line.contains("unit") || rest_of_line.contains("suite")
-                    || rest_of_line.contains(" nw") || rest_of_line.contains(" sw")
-                    || rest_of_line.contains("cynthia") || rest_of_line.contains("drive")
-                    || rest_of_line.contains("road") || rest_of_line.contains("lane");
-                if has_address_word {
+                if has_address_words(&rest_of_line) {
                     skipped_lines += 1;
                     i += 1;
                     continue;
                 }
-                // Also skip short non-zero-leading numbers with garbled descriptions
-                let alpha_count = rest_of_line.chars().filter(|c| c.is_ascii_alphabetic()).count();
-                let total_count = rest_of_line.len().max(1);
-                if (alpha_count as f32 / total_count as f32) < 0.4 {
+                if is_garbled_text(&rest_of_line, 0.4) {
                     skipped_lines += 1;
                     i += 1;
                     continue;
@@ -3781,7 +3789,7 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
 
             // --- Room/Qty extraction using trailing digit analysis ---
             // PDF columns (ticket#, description, style, room#, qty) merge together in text extraction.
-            // The last 4+ consecutive digits at end of line encode: room_number (3 digits) + qty (1 digit)
+            // The last 4+ consecutive digits at end of line encode: room_number (3 digits) + qty (1-2 digits)
             let full_line = parts[1..].join(" ");
             let line_bytes = full_line.as_bytes();
             let line_len = full_line.len();
@@ -3793,31 +3801,23 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
             }
             let trailing_digits = &full_line[digit_start..];
 
+            // Use the consolidated parse_room_qty helper which handles both 1 and 2-digit qty
             let mut extracted = false;
-            if trailing_digits.len() >= 4 {
-                let split = trailing_digits.len() - 1;
-                let room_str = &trailing_digits[..split];
-                if let Ok(q) = trailing_digits[split..].parse::<i32>() {
-                    if let Ok(room_num) = room_str.parse::<i32>() {
-                        if q >= 1 && q <= 9 && room_num >= 100 && room_num <= 999 {
-                            room = Some(room_str.to_string());
-                            qty = q;
-                            extracted = true;
-                            // Description: everything before trailing digits, strip trailing comma/space
-                            let desc_raw = &full_line[..digit_start];
-                            let desc_clean = desc_raw.trim_end().trim_end_matches(',').trim_end();
-                            description = if desc_clean.is_empty() { None } else { Some(desc_clean.to_string()) };
-                        }
-                    }
-                }
+            if let Some((r, q)) = parse_room_qty(trailing_digits) {
+                room = Some(r);
+                qty = q;
+                extracted = true;
+                let desc_raw = &full_line[..digit_start];
+                let desc_clean = desc_raw.trim_end().trim_end_matches(',').trim_end();
+                description = if desc_clean.is_empty() { None } else { Some(desc_clean.to_string()) };
             }
 
             if !extracted {
                 // Fallback: try parsing last whitespace-separated tokens as qty and room
                 let mut end_idx = parts.len();
-                // Last token might be qty (small integer 1-9)
+                // Last token might be qty (integer 1-99)
                 if let Ok(q) = parts[parts.len() - 1].parse::<i32>() {
-                    if q >= 1 && q <= 9 {
+                    if q >= 1 && q <= 99 {
                         qty = q;
                         end_idx -= 1;
                     }
