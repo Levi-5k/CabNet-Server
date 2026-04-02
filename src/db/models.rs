@@ -221,6 +221,7 @@ pub struct JobWithCount {
     #[serde(flatten)]
     pub job: Job,
     pub scan_count: i32,
+    pub file_count: i32,
 }
 
 /// Device with statistics for display

@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use crate::config::get_data_dir;
 
 // ==================== RESPONSE TYPES ====================
 
@@ -182,6 +183,7 @@ pub struct JobDownloadPayload {
     pub notes: String,
     pub priority: String,
     pub due_date: Option<i64>,
+    pub file_count: i32,
 }
 
 /// Convert RFC3339 string to epoch millis
@@ -704,6 +706,7 @@ pub async fn get_jobs(
                 notes: j.notes.unwrap_or_default(),
                 priority: j.priority,
                 due_date: j.due_date.as_deref().map(rfc3339_to_millis),
+                file_count: jwc.file_count,
             }
         })
         .collect();
@@ -2522,6 +2525,18 @@ pub async fn upload_job_file(
         (StatusCode::BAD_REQUEST, Json(ApiResponse::error("No file data found")))
     })?;
 
+    // Save PDF to disk: {data_dir}/jobs/{job_id}/
+    let job_dir = get_data_dir().join("jobs").join(&job_id);
+    if let Err(e) = tokio::fs::create_dir_all(&job_dir).await {
+        tracing::warn!("[PDF] Failed to create job directory {:?}: {}", job_dir, e);
+    } else {
+        let file_path = job_dir.join(&file_name);
+        match tokio::fs::write(&file_path, &file_bytes).await {
+            Ok(_) => tracing::info!("[PDF] Saved file to disk: {:?} ({} bytes)", file_path, file_bytes.len()),
+            Err(e) => tracing::warn!("[PDF] Failed to save file to disk {:?}: {}", file_path, e),
+        }
+    }
+
     // Basic PDF text extraction for search
     let extracted_text = extract_pdf_text(&file_bytes, &file_name);
 
@@ -2642,13 +2657,12 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
 
     tracing::debug!("[PDF:extract] Starting text extraction for '{}' ({} bytes)", file_name, data.len());
 
-    let raw_str = String::from_utf8_lossy(data);
-
     // --- Phase 1: Index objects and decompress streams ---
     // Build obj_number -> decompressed stream content
     let mut obj_streams: HashMap<u32, String> = HashMap::new();
-    // Also keep a flat list for fallback
+    // Also keep a flat list for fallback, with optional object number
     let mut all_streams: Vec<String> = Vec::new();
+    let mut all_stream_obj_nums: Vec<Option<u32>> = Vec::new();
 
     let raw = data;
     let mut pos = 0;
@@ -2698,6 +2712,7 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                         obj_streams.insert(num, text.clone());
                     }
                     all_streams.push(text);
+                    all_stream_obj_nums.push(obj_num);
                 }
 
                 pos = end + 9;
@@ -2719,95 +2734,204 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
         }
     }
 
-    // --- Phase 2: Build per-font CMap tables ---
-    // Step 2a: Find font objects and their /ToUnicode references
-    // Look for patterns like: /Type /Font ... /ToUnicode N 0 R
-    // And font resource mappings: /Font << /F1 N 0 R /F2 M 0 R >>
-    let mut font_to_tounicode_obj: HashMap<String, u32> = HashMap::new(); // font_name -> tounicode obj num
-    let mut font_cmaps: HashMap<String, HashMap<u16, char>> = HashMap::new(); // font_name -> cmap
+    // --- Phase 2: Build per-page font CMap tables ---
+    // Different pages may use the SAME font name (e.g., /c) mapped to DIFFERENT font objects
+    // with completely different CMaps. We must resolve fonts per-page (per-content-stream).
 
-    // Parse the raw PDF text (not streams) for font dictionaries
-    // Find /Font resource dictionaries: /Font << /F1 5 0 R /F2 6 0 R >>
-    let mut font_name_to_obj: HashMap<String, u32> = HashMap::new();
-    {
-        let re_font_res = "/Font";
-        let mut search_pos = 0;
-        while let Some(font_pos) = raw_str[search_pos..].find(re_font_res) {
-            let abs_pos = search_pos + font_pos + re_font_res.len();
-            // Find the next << ... >>
-            if let Some(dict_open) = raw_str[abs_pos..].find("<<") {
-                let dict_start = abs_pos + dict_open + 2;
-                // Only look if << is very close (within 20 chars, allowing whitespace)
-                if dict_open > 20 {
-                    search_pos = abs_pos;
-                    continue;
+    // Step 2a: Parse /Type /Page objects to build content_stream → { font_name → font_obj }
+    // Handles both /Contents N 0 R (direct) and /Contents [N 0 R] (array) syntax.
+    // Handles both inline /Font << ... >> and indirect /Resources N 0 R (resolves the ref).
+    let mut stream_font_map: HashMap<u32, HashMap<String, u32>> = HashMap::new();
+
+    // Helper: parse a /Font << /name obj 0 R ... >> dict from a text region
+    fn parse_font_dict_from_region(region: &str) -> Option<HashMap<String, u32>> {
+        let f_pos = region.find("/Font")?;
+        let after_f = &region[f_pos + "/Font".len()..];
+        let open = after_f.find("<<")?;
+        if open >= 30 { return None; }
+        let inner = &after_f[open + 2..];
+        let close = inner.find(">>")?;
+        let font_dict = &inner[..close];
+        let tokens: Vec<&str> = font_dict.split_whitespace().collect();
+        let mut fonts: HashMap<String, u32> = HashMap::new();
+        let mut t = 0;
+        while t + 3 < tokens.len() {
+            if tokens[t].starts_with('/') && tokens[t + 2] == "0" && tokens[t + 3] == "R" {
+                let name = tokens[t][1..].to_string();
+                if let Ok(obj) = tokens[t + 1].parse::<u32>() {
+                    fonts.insert(name, obj);
                 }
-                if let Some(dict_close) = raw_str[dict_start..].find(">>") {
-                    let dict_content = &raw_str[dict_start..dict_start + dict_close];
-                    // Parse "/F1 5 0 R /F2 6 0 R" etc.
-                    let tokens: Vec<&str> = dict_content.split_whitespace().collect();
-                    let mut t = 0;
-                    while t + 3 < tokens.len() {
-                        if tokens[t].starts_with('/') && tokens[t + 2] == "0" && tokens[t + 3] == "R" {
-                            let font_name = tokens[t][1..].to_string(); // e.g. "F1"
-                            if let Ok(obj_num) = tokens[t + 1].parse::<u32>() {
-                                font_name_to_obj.insert(font_name, obj_num);
-                            }
-                            t += 4;
-                        } else {
-                            t += 1;
-                        }
-                    }
-                    search_pos = dict_start + dict_close;
-                } else {
-                    search_pos = abs_pos;
-                }
+                t += 4;
             } else {
-                search_pos = abs_pos;
+                t += 1;
             }
         }
+        if fonts.is_empty() { None } else { Some(fonts) }
     }
-    tracing::debug!("[PDF:extract] Font resource names: {:?}", font_name_to_obj);
 
-    // Now for each font object, find its /ToUnicode reference
-    for (font_name, font_obj_num) in &font_name_to_obj {
-        // Find the font object dictionary in the raw PDF
-        let obj_marker = format!("{} 0 obj", font_obj_num);
-        if let Some(obj_pos) = raw_str.find(&obj_marker) {
-            let search_region = &raw_str[obj_pos..std::cmp::min(obj_pos + 2000, raw_str.len())];
-            // Look for /ToUnicode N 0 R
+    // Helper: find object N definition in raw PDF and return its text region
+    fn find_obj_text(raw: &[u8], obj_num: u32) -> Option<String> {
+        let needle = format!("{} 0 obj", obj_num);
+        let needle_bytes = needle.as_bytes();
+        let mut pos = 0;
+        while pos < raw.len() {
+            match find_bytes(&raw[pos..], needle_bytes) {
+                Some(found) => {
+                    let abs = pos + found;
+                    // Ensure it's not part of a larger number (e.g., "26 0 obj" for "6 0 obj")
+                    if abs == 0 || !raw[abs - 1].is_ascii_digit() {
+                        let end = std::cmp::min(abs + 1000, raw.len());
+                        return Some(String::from_utf8_lossy(&raw[abs..end]).to_string());
+                    }
+                    pos = abs + needle_bytes.len();
+                }
+                None => break,
+            }
+        }
+        None
+    }
+
+    {
+        let page_needle = b"/Type /Page";
+        let mut search_pos: usize = 0;
+        while search_pos < raw.len() {
+            // Find next /Type /Page in raw bytes
+            let found = match find_bytes(&raw[search_pos..], page_needle) {
+                Some(p) => p,
+                None => break,
+            };
+            let abs_pos = search_pos + found;
+            let after_pos = abs_pos + page_needle.len();
+
+            // Skip /Type /Pages (page tree node)
+            if after_pos < raw.len() {
+                let mut check = after_pos;
+                while check < raw.len() && matches!(raw[check], b' ' | b'\t' | b'\r' | b'\n') {
+                    check += 1;
+                }
+                if check < raw.len() && raw[check] == b's' {
+                    search_pos = after_pos;
+                    continue;
+                }
+            }
+
+            // Extract region around /Type /Page for parsing the page dict
+            let region_start = abs_pos.saturating_sub(500);
+            let region_end = std::cmp::min(abs_pos + 2000, raw.len());
+            let region = String::from_utf8_lossy(&raw[region_start..region_end]).to_string();
+
+            // Extract /Contents reference - handle both direct N 0 R and array [N 0 R]
+            let mut content_obj: Option<u32> = None;
+            if let Some(c_pos) = region.find("/Contents") {
+                let after_c = region[c_pos + "/Contents".len()..].trim_start();
+                if after_c.starts_with('[') {
+                    // Array syntax: /Contents [N 0 R]
+                    let inner = &after_c[1..]; // skip '['
+                    let tokens: Vec<&str> = inner.split_whitespace().take(3).collect();
+                    if tokens.len() >= 3 && tokens[1] == "0" && (tokens[2] == "R" || tokens[2].starts_with("R]") || tokens[2].starts_with("R\n")) {
+                        content_obj = tokens[0].parse::<u32>().ok();
+                    }
+                } else {
+                    // Direct syntax: /Contents N 0 R
+                    let tokens: Vec<&str> = after_c.split_whitespace().take(3).collect();
+                    if tokens.len() >= 3 && tokens[1] == "0" && tokens[2] == "R" {
+                        content_obj = tokens[0].parse::<u32>().ok();
+                    }
+                }
+            }
+
+            if let Some(content_num) = content_obj {
+                let mut fonts_found: Option<HashMap<String, u32>> = None;
+
+                // FIRST try: indirect /Resources N 0 R → look up that object for /Font
+                // This is preferred because the region search can accidentally pick up
+                // a nearby Resource object from a DIFFERENT page.
+                if let Some(r_pos) = region.find("/Resources") {
+                    let after_r = region[r_pos + "/Resources".len()..].trim_start();
+                    if !after_r.starts_with("<<") {
+                        // Indirect reference: /Resources N 0 R
+                        let tokens: Vec<&str> = after_r.split_whitespace().take(3).collect();
+                        if tokens.len() >= 3 && tokens[1] == "0" && tokens[2] == "R" {
+                            if let Ok(res_obj_num) = tokens[0].parse::<u32>() {
+                                if let Some(res_text) = find_obj_text(&raw, res_obj_num) {
+                                    fonts_found = parse_font_dict_from_region(&res_text);
+                                }
+                            }
+                        }
+                    } else {
+                        // Inline resources: /Resources << ... /Font << ... >> ... >>
+                        fonts_found = parse_font_dict_from_region(&region);
+                    }
+                }
+
+                // Fallback: try inline /Font in the region (for pages with no /Resources key)
+                if fonts_found.is_none() {
+                    fonts_found = parse_font_dict_from_region(&region);
+                }
+
+                if let Some(fonts) = fonts_found {
+                    tracing::debug!("[PDF:extract] Page with /Contents {} has fonts: {:?}", content_num, fonts);
+                    stream_font_map.insert(content_num, fonts);
+                }
+            }
+
+            search_pos = after_pos;
+        }
+    }
+    tracing::debug!("[PDF:extract] Parsed {} page font mappings", stream_font_map.len());
+
+    // Step 2b: Collect ALL unique font objects and their ToUnicode references
+    // Key by font OBJECT NUMBER (globally unique) instead of font name (ambiguous across pages)
+    let mut font_obj_to_tounicode: HashMap<u32, u32> = HashMap::new();
+    let mut font_obj_cmaps: HashMap<u32, HashMap<u16, char>> = HashMap::new();
+    let mut font_obj_twobyte: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    // Collect all unique font object numbers from all pages
+    let mut all_font_objs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for fonts in stream_font_map.values() {
+        for &obj in fonts.values() {
+            all_font_objs.insert(obj);
+        }
+    }
+
+    // For each font object, find its /ToUnicode reference
+    for &font_obj_num in &all_font_objs {
+        if let Some(search_region) = find_obj_text(raw, font_obj_num) {
             if let Some(tu_pos) = search_region.find("/ToUnicode") {
                 let after_tu = &search_region[tu_pos + 10..];
                 let tokens: Vec<&str> = after_tu.split_whitespace().take(3).collect();
                 if tokens.len() >= 3 && tokens[1] == "0" && tokens[2] == "R" {
                     if let Ok(tu_obj) = tokens[0].parse::<u32>() {
-                        font_to_tounicode_obj.insert(font_name.clone(), tu_obj);
+                        font_obj_to_tounicode.insert(font_obj_num, tu_obj);
                     }
                 }
             }
         }
     }
-    tracing::debug!("[PDF:extract] Font -> ToUnicode obj: {:?}", font_to_tounicode_obj);
+    tracing::debug!("[PDF:extract] Font obj -> ToUnicode obj ({} mappings): {:?}",
+        font_obj_to_tounicode.len(), font_obj_to_tounicode);
 
-    // Parse each font's ToUnicode CMap
-    for (font_name, tu_obj_num) in &font_to_tounicode_obj {
-        if let Some(cmap_content) = obj_streams.get(tu_obj_num) {
+    // Parse each font object's ToUnicode CMap
+    for (&font_obj_num, &tu_obj_num) in &font_obj_to_tounicode {
+        if let Some(cmap_content) = obj_streams.get(&tu_obj_num) {
             let mut cmap: HashMap<u16, char> = HashMap::new();
             let entries = parse_tounicode_cmap_u16(cmap_content, &mut cmap);
             if entries > 0 {
-                tracing::debug!("[PDF:extract] Font '{}' CMap (obj {}): {} entries", font_name, tu_obj_num, entries);
-                font_cmaps.insert(font_name.clone(), cmap);
+                let is_twobyte = cmap.keys().any(|&k| k > 255);
+                if is_twobyte {
+                    font_obj_twobyte.insert(font_obj_num);
+                }
+                tracing::debug!("[PDF:extract] Font obj {} CMap (ToUnicode obj {}): {} entries, twobyte={}",
+                    font_obj_num, tu_obj_num, entries, is_twobyte);
+                font_obj_cmaps.insert(font_obj_num, cmap);
             }
-        } else {
-            // CMap might be in an unindexed stream — try to find it in all_streams
-            tracing::debug!("[PDF:extract] ToUnicode obj {} for font '{}' not found in indexed streams", tu_obj_num, font_name);
         }
     }
 
     // Fallback: if we found CMap streams but couldn't associate them with fonts,
     // build a merged map from any CMap-looking streams (for simple single-font PDFs)
     let mut fallback_cmap: HashMap<u16, char> = HashMap::new();
-    if font_cmaps.is_empty() {
+    if font_obj_cmaps.is_empty() {
         for content in &all_streams {
             if content.contains("beginbfchar") || content.contains("beginbfrange") {
                 parse_tounicode_cmap_u16(content, &mut fallback_cmap);
@@ -2818,16 +2942,16 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
         }
     }
 
-    let has_per_font = !font_cmaps.is_empty();
+    let has_per_page = !font_obj_cmaps.is_empty();
     let has_fallback = !fallback_cmap.is_empty();
 
-    tracing::info!("[PDF:extract] CMap status for '{}': {} per-font maps, {} fallback entries",
-        file_name, font_cmaps.len(), fallback_cmap.len());
+    tracing::info!("[PDF:extract] CMap status for '{}': {} font object CMaps across {} pages, {} fallback entries",
+        file_name, font_obj_cmaps.len(), stream_font_map.len(), fallback_cmap.len());
 
-    // --- Phase 3: Extract text from BT..ET blocks with font tracking ---
+    // --- Phase 3: Extract text from BT..ET blocks with per-page font tracking ---
     let mut all_texts: Vec<String> = Vec::new();
 
-    for content in &all_streams {
+    for (stream_idx, content) in all_streams.iter().enumerate() {
         if content.contains("beginbfchar") || content.contains("begincmap") {
             continue;
         }
@@ -2835,14 +2959,45 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
             continue;
         }
 
+        // Determine per-stream font mappings: font_name → font_obj_num
+        let stream_obj = all_stream_obj_nums.get(stream_idx).copied().flatten();
+        let per_stream_fonts: Option<&HashMap<String, u32>> = stream_obj.and_then(|n| stream_font_map.get(&n));
+
         let chars: Vec<char> = content.chars().collect();
         let len = chars.len();
         let mut i = 0;
         let mut in_bt = false;
         let mut line_texts: Vec<String> = Vec::new();
         let mut current_font: Option<String> = None;
+        let mut current_font_obj: Option<u32> = None;
+        let mut last_y: Option<f64> = None;
+        // Graphics state stack for q/Q operators — saves/restores current font
+        let mut gstate_stack: Vec<(Option<String>, Option<u32>)> = Vec::new();
 
         while i < len {
+            // Handle q (save graphics state) — can appear outside BT..ET
+            if chars[i] == 'q'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 1 >= len || chars[i + 1].is_whitespace() || chars[i + 1] == '\n' || chars[i + 1] == '\r')
+            {
+                gstate_stack.push((current_font.clone(), current_font_obj));
+                i += 1;
+                continue;
+            }
+
+            // Handle Q (restore graphics state) — can appear outside BT..ET
+            if chars[i] == 'Q'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 1 >= len || chars[i + 1].is_whitespace() || chars[i + 1] == '\n' || chars[i + 1] == '\r')
+            {
+                if let Some((saved_font, saved_obj)) = gstate_stack.pop() {
+                    current_font = saved_font;
+                    current_font_obj = saved_obj;
+                }
+                i += 1;
+                continue;
+            }
+
             // Detect BT
             if !in_bt && i + 1 < len && chars[i] == 'B' && chars[i + 1] == 'T'
                 && (i == 0 || chars[i - 1].is_whitespace())
@@ -2867,6 +3022,103 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 continue;
             }
 
+            // Inside BT..ET, detect text positioning operators for proper line/column breaks
+            // T* → explicit new line
+            if in_bt && chars[i] == 'T' && i + 1 < len && chars[i + 1] == '*'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n')
+            {
+                if !line_texts.is_empty() {
+                    all_texts.push(line_texts.join(""));
+                    line_texts.clear();
+                }
+                i += 2;
+                continue;
+            }
+
+            // Td / TD → "tx ty Td" — look backward for the ty number
+            if in_bt && chars[i] == 'T' && i + 1 < len && (chars[i + 1] == 'd' || chars[i + 1] == 'D')
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n')
+            {
+                // Scan backward to find ty (the number right before "Td")
+                let mut j = i as isize - 1;
+                while j >= 0 && chars[j as usize].is_whitespace() { j -= 1; }
+                let num_end = j as usize + 1;
+                while j >= 0 && (chars[j as usize].is_ascii_digit() || chars[j as usize] == '.' || chars[j as usize] == '-') { j -= 1; }
+                let num_start = (j + 1) as usize;
+                if num_start < num_end {
+                    let ty_str: String = chars[num_start..num_end].iter().collect();
+                    if let Ok(ty) = ty_str.parse::<f64>() {
+                        if ty < -1.0 {
+                            // Y moved down → new row
+                            if !line_texts.is_empty() {
+                                all_texts.push(line_texts.join(""));
+                                line_texts.clear();
+                            }
+                        } else if ty.abs() < 0.5 {
+                            // Same row, horizontal move → column separator
+                            if !line_texts.is_empty() {
+                                line_texts.push(" ".to_string());
+                            }
+                        }
+                    }
+                }
+                i += 2;
+                continue;
+            }
+
+            // Tm → "a b c d e f Tm" — f is Y position, track for row changes
+            if in_bt && chars[i] == 'T' && i + 1 < len && chars[i + 1] == 'm'
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2] == '\n')
+                // Avoid matching "Tm" inside other tokens like "Tmc"
+                && (i + 2 >= len || !chars[i + 2].is_ascii_alphabetic())
+            {
+                // Scan backward to find f (Y), which is the last number before "Tm"
+                let mut j = i as isize - 1;
+                while j >= 0 && chars[j as usize].is_whitespace() { j -= 1; }
+                let num_end = j as usize + 1;
+                while j >= 0 && (chars[j as usize].is_ascii_digit() || chars[j as usize] == '.' || chars[j as usize] == '-') { j -= 1; }
+                let num_start = (j + 1) as usize;
+                if num_start < num_end {
+                    let y_str: String = chars[num_start..num_end].iter().collect();
+                    if let Ok(y) = y_str.parse::<f64>() {
+                        if let Some(prev_y) = last_y {
+                            let dy = y - prev_y;
+                            if dy.abs() > 1.0 {
+                                // Y changed → new row
+                                if !line_texts.is_empty() {
+                                    all_texts.push(line_texts.join(""));
+                                    line_texts.clear();
+                                }
+                            } else {
+                                // Same Y → column separator
+                                if !line_texts.is_empty() {
+                                    line_texts.push(" ".to_string());
+                                }
+                            }
+                        }
+                        last_y = Some(y);
+                    }
+                }
+                i += 2;
+                continue;
+            }
+
+            // ' (single quote) → move to next line and show text (equivalent to T* + Tj)
+            if in_bt && chars[i] == '\''
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && (i + 1 >= len || chars[i + 1].is_whitespace() || chars[i + 1] == '(')
+            {
+                if !line_texts.is_empty() {
+                    all_texts.push(line_texts.join(""));
+                    line_texts.clear();
+                }
+                i += 1;
+                continue;
+            }
+
             // Inside BT..ET, detect Tf operator to track current font: /F1 12 Tf
             if in_bt && chars[i] == '/' {
                 // Parse font name: /F1, /F2, /TT0, etc.
@@ -2881,6 +3133,27 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
                 let tf_tokens: Vec<&str> = remaining.split_whitespace().take(2).collect();
                 if tf_tokens.len() >= 2 && tf_tokens[1] == "Tf" {
                     current_font = Some(name.clone());
+                    // Resolve font name → font object number using per-stream page mapping
+                    current_font_obj = per_stream_fonts.and_then(|fonts| fonts.get(&name).copied());
+                    // Fallback: if font not in this page's resources, search all pages
+                    // (handles PDFs where page Resources are incomplete, e.g., merged PDFs)
+                    if current_font_obj.is_none() {
+                        // Prefer a page whose content stream obj number is close to ours
+                        // (likely same "copy" in multi-copy PDFs)
+                        let mut best_obj: Option<u32> = None;
+                        let my_stream_num = stream_obj.unwrap_or(0);
+                        let mut best_dist = u32::MAX;
+                        for (&other_stream, other_fonts) in &stream_font_map {
+                            if let Some(&font_obj) = other_fonts.get(&name) {
+                                let dist = (other_stream as i64 - my_stream_num as i64).unsigned_abs() as u32;
+                                if dist < best_dist {
+                                    best_dist = dist;
+                                    best_obj = Some(font_obj);
+                                }
+                            }
+                        }
+                        current_font_obj = best_obj;
+                    }
                     // Skip past the Tf
                     i = j;
                     // Skip past "size Tf"
@@ -2894,23 +3167,50 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
             if in_bt && chars[i] == '(' {
                 let raw_chars = extract_paren_string(&chars, &mut i, len);
 
-                let active_cmap = if has_per_font {
-                    current_font.as_ref().and_then(|f| font_cmaps.get(f))
+                let active_cmap = if has_per_page {
+                    current_font_obj.and_then(|obj| font_obj_cmaps.get(&obj))
                 } else if has_fallback {
                     Some(&fallback_cmap)
                 } else {
                     None
                 };
 
+                let is_twobyte = current_font_obj.map_or(false, |obj| font_obj_twobyte.contains(&obj));
                 let text: String = if let Some(cmap) = active_cmap {
-                    raw_chars.iter().map(|&c| {
-                        let code = c as u32;
-                        if code <= 0xFFFF {
-                            cmap.get(&(code as u16)).copied().unwrap_or(c)
-                        } else {
-                            c
+                    if is_twobyte {
+                        // 2-byte font: read pairs of chars as big-endian u16 codes
+                        let mut result = String::new();
+                        let mut ci = 0;
+                        while ci < raw_chars.len() {
+                            if ci + 1 < raw_chars.len() {
+                                let code = (raw_chars[ci] as u16) << 8 | (raw_chars[ci + 1] as u16);
+                                if let Some(&ch) = cmap.get(&code) {
+                                    result.push(ch);
+                                } else {
+                                    // Try single byte fallback
+                                    let code1 = raw_chars[ci] as u16;
+                                    result.push(cmap.get(&code1).copied().unwrap_or(raw_chars[ci]));
+                                    let code2 = raw_chars[ci + 1] as u16;
+                                    result.push(cmap.get(&code2).copied().unwrap_or(raw_chars[ci + 1]));
+                                }
+                                ci += 2;
+                            } else {
+                                let code = raw_chars[ci] as u16;
+                                result.push(cmap.get(&code).copied().unwrap_or(raw_chars[ci]));
+                                ci += 1;
+                            }
                         }
-                    }).collect()
+                        result
+                    } else {
+                        raw_chars.iter().map(|&c| {
+                            let code = c as u32;
+                            if code <= 0xFFFF {
+                                cmap.get(&(code as u16)).copied().unwrap_or(c)
+                            } else {
+                                c
+                            }
+                        }).collect()
+                    }
                 } else {
                     raw_chars.into_iter().collect()
                 };
@@ -2925,18 +3225,42 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
             if in_bt && chars[i] == '<' && (i + 1 < len && chars[i + 1] != '<') {
                 let bytes = extract_hex_string(&chars, &mut i, len);
 
-                let active_cmap = if has_per_font {
-                    current_font.as_ref().and_then(|f| font_cmaps.get(f))
+                let active_cmap = if has_per_page {
+                    current_font_obj.and_then(|obj| font_obj_cmaps.get(&obj))
                 } else if has_fallback {
                     Some(&fallback_cmap)
                 } else {
                     None
                 };
 
+                let is_twobyte = current_font_obj.map_or(false, |obj| font_obj_twobyte.contains(&obj));
                 let decoded: String = if let Some(cmap) = active_cmap {
-                    bytes.iter().map(|&b| {
-                        cmap.get(&(b as u16)).copied().unwrap_or(b as char)
-                    }).collect()
+                    if is_twobyte {
+                        // 2-byte font: read byte pairs as big-endian u16 codes
+                        let mut result = String::new();
+                        let mut bi = 0;
+                        while bi < bytes.len() {
+                            if bi + 1 < bytes.len() {
+                                let code = (bytes[bi] as u16) << 8 | (bytes[bi + 1] as u16);
+                                if let Some(&ch) = cmap.get(&code) {
+                                    result.push(ch);
+                                } else {
+                                    // Try single byte fallback
+                                    result.push(cmap.get(&(bytes[bi] as u16)).copied().unwrap_or(bytes[bi] as char));
+                                    result.push(cmap.get(&(bytes[bi + 1] as u16)).copied().unwrap_or(bytes[bi + 1] as char));
+                                }
+                                bi += 2;
+                            } else {
+                                result.push(cmap.get(&(bytes[bi] as u16)).copied().unwrap_or(bytes[bi] as char));
+                                bi += 1;
+                            }
+                        }
+                        result
+                    } else {
+                        bytes.iter().map(|&b| {
+                            cmap.get(&(b as u16)).copied().unwrap_or(b as char)
+                        }).collect()
+                    }
                 } else {
                     String::from_utf8_lossy(&bytes).to_string()
                 };
@@ -3077,6 +3401,32 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Split a CMap line into individual hex tokens.
+/// Handles both space-separated (<20> <20> <0052>) and concatenated (<0026><0026><0043>) formats.
+fn split_cmap_hex_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_bracket = false;
+    for ch in line.chars() {
+        if ch == '<' {
+            in_bracket = true;
+            current.clear();
+        } else if ch == '>' {
+            if in_bracket && !current.is_empty() {
+                tokens.push(format!("<{}>", current));
+            }
+            in_bracket = false;
+            current.clear();
+        } else if ch == '[' || ch == ']' {
+            // Array markers — push as separate token
+            tokens.push(ch.to_string());
+        } else if in_bracket {
+            current.push(ch);
+        }
+    }
+    tokens
+}
+
 /// Parse a /ToUnicode CMap stream into a u16 → char mapping (supports multi-byte codes).
 fn parse_tounicode_cmap_u16(content: &str, map: &mut std::collections::HashMap<u16, char>) -> usize {
     let mut added = 0usize;
@@ -3092,10 +3442,9 @@ fn parse_tounicode_cmap_u16(content: &str, map: &mut std::collections::HashMap<u
             while i < lines.len() {
                 let l = lines[i].trim();
                 if l.contains("endbfchar") { break; }
-                // Parse: <src> <unicode>
-                let tokens: Vec<&str> = l.split_whitespace().collect();
+                let tokens = split_cmap_hex_tokens(l);
                 if tokens.len() >= 2 {
-                    if let (Some(src), Some(dst)) = (parse_cmap_hex(tokens[0]), parse_cmap_hex(tokens[1])) {
+                    if let (Some(src), Some(dst)) = (parse_cmap_hex(&tokens[0]), parse_cmap_hex(&tokens[1])) {
                         if src <= 0xFFFF {
                             if let Some(c) = char::from_u32(dst) {
                                 map.insert(src as u16, c);
@@ -3114,30 +3463,30 @@ fn parse_tounicode_cmap_u16(content: &str, map: &mut std::collections::HashMap<u
             while i < lines.len() {
                 let l = lines[i].trim();
                 if l.contains("endbfrange") { break; }
-                let tokens: Vec<&str> = l.split_whitespace().collect();
+                let tokens = split_cmap_hex_tokens(l);
                 if tokens.len() >= 3 {
-                    // Check for array form: <start> <end> [<u1> <u2> ...]
-                    if tokens[2].starts_with('[') {
-                        if let (Some(range_start), Some(range_end)) = (parse_cmap_hex(tokens[0]), parse_cmap_hex(tokens[1])) {
-                            // Collect all hex values inside [...] across tokens
-                            let rest = l[l.find('[').unwrap_or(0)..].trim_start_matches('[');
-                            let rest = rest.trim_end_matches(']');
-                            let hex_values: Vec<&str> = rest.split_whitespace().collect();
-                            for (offset, hex_val) in hex_values.iter().enumerate() {
-                                let src = range_start + offset as u32;
+                    // Check for array form: <start> <end> [ <u1> <u2> ... ]
+                    if tokens[2] == "[" {
+                        if let (Some(range_start), Some(range_end)) = (parse_cmap_hex(&tokens[0]), parse_cmap_hex(&tokens[1])) {
+                            // Everything after "[" up to "]" are unicode values
+                            let mut offset = 0u32;
+                            for t in &tokens[3..] {
+                                if *t == "]" { break; }
+                                let src = range_start + offset;
                                 if src > 0xFFFF || src > range_end { break; }
-                                if let Some(dst) = parse_cmap_hex(hex_val) {
+                                if let Some(dst) = parse_cmap_hex(t) {
                                     if let Some(c) = char::from_u32(dst) {
                                         map.insert(src as u16, c);
                                         added += 1;
                                     }
                                 }
+                                offset += 1;
                             }
                         }
                     } else {
                         // Simple form: <start> <end> <unicode_start>
                         if let (Some(range_start), Some(range_end), Some(uni_start)) =
-                            (parse_cmap_hex(tokens[0]), parse_cmap_hex(tokens[1]), parse_cmap_hex(tokens[2]))
+                            (parse_cmap_hex(&tokens[0]), parse_cmap_hex(&tokens[1]), parse_cmap_hex(&tokens[2]))
                         {
                             if range_end >= range_start {
                                 for offset in 0..=(range_end - range_start) {
@@ -3174,91 +3523,362 @@ fn parse_cmap_hex(s: &str) -> Option<u32> {
 /// Parse lading/shipping PDF text into ticket records
 /// Returns tuples of (job_id, file_uuid, ticket_number, description, room, qty, section)
 fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &str) -> Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> {
-    let mut tickets = Vec::new();
+    let mut tickets: Vec<(String, String, String, Option<String>, Option<String>, i32, Option<String>)> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut current_section: Option<String> = None;
+    let mut seen_section_header = false;
     let mut skipped_lines = 0u32;
-    let total_lines = text.split('\n').count();
+    let raw_line_count = text.split('\n').count();
+    // Pre-filter empty lines so lookahead works on meaningful content
+    let lines: Vec<&str> = text.split('\n').map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let total_lines = lines.len();
 
-    tracing::debug!("[PDF:tickets] Parsing {} lines of text from '{}' for job {}", total_lines, file_name, job_id);
+    tracing::debug!("[PDF:tickets] Parsing {} lines ({} non-empty) of text from '{}' for job {}",
+        raw_line_count, total_lines, file_name, job_id);
 
-    for line in text.split('\n') {
-        let line = line.trim();
-        if line.is_empty() { continue; }
+    // Helper: parse a digit-only string as room(3)+qty(1)
+    fn parse_room_qty(s: &str) -> Option<(String, i32)> {
+        if s.len() >= 4 && s.chars().all(|c| c.is_ascii_digit()) {
+            let split = s.len() - 1;
+            if let (Ok(room_num), Ok(q)) = (s[..split].parse::<i32>(), s[split..].parse::<i32>()) {
+                if room_num >= 100 && room_num <= 999 && q >= 1 && q <= 9 {
+                    return Some((s[..split].to_string(), q));
+                }
+            }
+        }
+        None
+    }
 
-        // Detect section headers like "HARDWARE TICKETS"
+    let mut i = 0;
+    while i < total_lines {
+        let line = lines[i];
+
+        // Detect section headers like "HARDWARE TICKETS", "Shipping Advice", etc.
         let upper = line.to_uppercase();
         if upper.contains("TICKETS") || upper.contains("HARDWARE") || upper.contains("SHIPPING") {
             current_section = Some(line.to_string());
+            seen_section_header = true;
             tracing::debug!("[PDF:tickets] Section header detected: '{}'", line);
+            i += 1;
             continue;
         }
 
         // Skip header lines
-        if upper.contains("PRIORITY") && upper.contains("TICKET") { skipped_lines += 1; continue; }
-        if upper.contains("REPORT REF") || upper.contains("RUN DATE") { skipped_lines += 1; continue; }
+        if upper.contains("PRIORITY") && upper.contains("TICKET") { skipped_lines += 1; i += 1; continue; }
+        if upper.contains("REPORT REF") || upper.contains("RUN DATE") { skipped_lines += 1; i += 1; continue; }
+        if upper.contains("DESCRIPTION") && upper.len() < 20 { skipped_lines += 1; i += 1; continue; }
+        if upper == "QTY" || upper == "ROOM" { skipped_lines += 1; i += 1; continue; }
 
-        // Try to parse ticket lines: "000115 SS Counter Top 103 1"
-        // Pattern: ticket_number (digits, 3-8 chars) followed by description, room, qty
+        // Skip all lines before the first section header (page headers, addresses, etc.)
+        if !seen_section_header {
+            skipped_lines += 1;
+            i += 1;
+            continue;
+        }
+
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() { continue; }
+        if parts.is_empty() { i += 1; continue; }
 
         // First token should be a ticket number (all digits, 3-8 chars)
         let first = parts[0];
         if first.len() < 3 || first.len() > 8 || !first.chars().all(|c| c.is_ascii_digit()) {
             skipped_lines += 1;
+            i += 1;
             continue;
         }
 
-        // Skip if it looks like "Multi-Ticketed" or header marker
+        // Skip if it looks like "Multi-Ticketed" or header marker (single-line format)
         if parts.len() > 1 && parts[1].starts_with('*') {
-            // Handle multi-ticket grouping - skip header row
+            i += 1;
             continue;
         }
-
-        // Parse remaining tokens. Last token might be qty (integer), second-to-last might be room
-        if parts.len() < 2 { continue; }
 
         let ticket_number = first.to_string();
-
-        // Try to find qty at the end (last token that's a small integer)
-        let mut qty: i32 = 1;
-        let mut end_idx = parts.len();
-        if let Ok(q) = parts[parts.len() - 1].parse::<i32>() {
-            if q >= 0 && q < 10000 {
-                qty = q;
-                end_idx -= 1;
-            }
-        }
-
-        // Try to find room number (number or short alphanumeric before qty)
         let mut room: Option<String> = None;
-        if end_idx > 1 {
-            let potential_room = parts[end_idx - 1];
-            // Room numbers are typically 3-digit numbers or short names like "SINKS"
-            let is_room = potential_room.len() <= 10
-                && (potential_room.chars().all(|c| c.is_ascii_digit())
-                    || potential_room.chars().all(|c| c.is_ascii_alphanumeric()));
-            // But not if it's clearly part of the description (contains dots/dashes typical of part numbers)
-            let is_part_number = potential_room.contains('.') || potential_room.contains('-');
-            if is_room && !is_part_number && end_idx > 2 {
-                room = Some(potential_room.to_string());
-                end_idx -= 1;
+        let mut qty: i32 = 1;
+        let mut description: Option<String> = None;
+        let mut lines_consumed: usize = 1;
+
+        if parts.len() == 1 {
+            // *** MULTILINE FORMAT: ticket number alone on its own line ***
+            // Look ahead for description and/or room+qty on subsequent lines
+            if i + 1 < total_lines {
+                let next = lines[i + 1];
+
+                // If next line starts with * it's a Multi-Ticketed grouping header — skip
+                if next.starts_with('*') {
+                    i += 2;
+                    continue;
+                }
+
+                let next_is_all_digits = !next.is_empty() && next.chars().all(|c| c.is_ascii_digit());
+
+                if next_is_all_digits && next.len() >= 3 && next.len() <= 5 {
+                    // Next line is room+qty directly (no description line)
+                    if let Some((r, q)) = parse_room_qty(next) {
+                        room = Some(r);
+                        qty = q;
+                    }
+                    lines_consumed = 2;
+                } else if !next_is_all_digits && !next.is_empty() {
+                    // Don't consume section headers or column headers
+                    let nu = next.to_uppercase();
+                    let is_header = nu.contains("TICKETS") || nu.contains("HARDWARE")
+                        || nu.contains("SHIPPING") || (nu.contains("PRIORITY") && nu.contains("TICKET"))
+                        || nu.contains("REPORT REF") || nu.contains("PAGE ");
+
+                    // Reject garbled/too-short "descriptions" (e.g. "y6", "pB", garbled CMap leftovers)
+                    // BUT exempt lines with " - " separator (part-number descriptions like "530.1094 - Elbow Catch")
+                    let next_alpha = next.chars().filter(|c| c.is_ascii_alphabetic()).count();
+                    let has_part_number_sep = next.contains(" - ");
+                    let is_garbled_desc = next.len() < 4
+                        || ((next_alpha as f32 / next.len().max(1) as f32) < 0.4 && !has_part_number_sep);
+
+                    if !is_header && !is_garbled_desc {
+                        // Next line is the description
+                        let desc_text = next.to_string();
+                        lines_consumed = 2;
+
+                        // Check if the description line has trailing digits (room+qty merged)
+                        // BUT skip this for part-number descriptions (contain " - " separator)
+                        // e.g. "530.1094 - Elbow Catch 1018" — the "1018" is part of the product name
+                        let desc_bytes = desc_text.as_bytes();
+                        let desc_len = desc_text.len();
+                        let mut dstart = desc_len;
+                        while dstart > 0 && desc_bytes[dstart - 1].is_ascii_digit() {
+                            dstart -= 1;
+                        }
+                        let desc_trailing = &desc_text[dstart..];
+                        let has_part_sep = desc_text.contains(" - ");
+
+                        let mut did_extract_trailing = false;
+                        if !has_part_sep && !desc_trailing.is_empty() {
+                            if let Some((r, q)) = parse_room_qty(desc_trailing) {
+                                // Room+qty merged at end of description line
+                                room = Some(r);
+                                qty = q;
+                                let desc_clean = desc_text[..dstart].trim_end().trim_end_matches(',').trim_end();
+                                description = if desc_clean.is_empty() { None } else { Some(desc_clean.to_string()) };
+                                did_extract_trailing = true;
+                            }
+                        }
+
+                        if !did_extract_trailing {
+                            // Description is clean, look for room+qty on the NEXT line
+                            description = Some(desc_text);
+
+                            if i + 2 < total_lines {
+                                let rq_line = lines[i + 2];
+                                let rq_all_digits = !rq_line.is_empty() && rq_line.chars().all(|c| c.is_ascii_digit());
+
+                                if rq_all_digits && rq_line.len() >= 3 && rq_line.len() <= 5 {
+                                    if let Some((r, q)) = parse_room_qty(rq_line) {
+                                        room = Some(r);
+                                        qty = q;
+                                        lines_consumed = 3;
+                                    }
+                                } else if rq_all_digits && rq_line.len() >= 1 && rq_line.len() <= 3 {
+                                    // Standalone room or qty
+                                    let rq_num = rq_line.parse::<i32>().unwrap_or(0);
+                                    if rq_num >= 100 && rq_num <= 999 {
+                                        // 3-digit: standalone room, check next line for qty
+                                        room = Some(rq_line.to_string());
+                                        lines_consumed = 3;
+                                        if i + 3 < total_lines {
+                                            let qty_line = lines[i + 3].trim();
+                                            if let Ok(q) = qty_line.parse::<i32>() {
+                                                if q >= 1 && q <= 999 {
+                                                    qty = q;
+                                                    lines_consumed = 4;
+                                                }
+                                            }
+                                        }
+                                    } else if rq_num >= 1 && rq_num <= 99 {
+                                        // 1-2 digit: standalone qty (common in HARDWARE section)
+                                        qty = rq_num;
+                                        lines_consumed = 3;
+                                    }
+                                } else if !rq_all_digits && !rq_line.is_empty() {
+                                    // Room might be a text label (e.g. "INSTAL", "SINKS") + qty on next line
+                                    let rq_upper = rq_line.to_uppercase();
+                                    let is_room_label = rq_upper.chars().all(|c| c.is_ascii_alphabetic() || c.is_whitespace())
+                                        && rq_line.len() >= 2 && rq_line.len() <= 15;
+                                    if is_room_label {
+                                        room = Some(rq_line.to_string());
+                                        lines_consumed = 3;
+                                        // Check next line for qty
+                                        if i + 3 < total_lines {
+                                            let qty_line = lines[i + 3].trim();
+                                            if let Ok(q) = qty_line.parse::<i32>() {
+                                                if q >= 1 && q <= 999 {
+                                                    qty = q;
+                                                    lines_consumed = 4;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::debug!("[PDF:tickets] Multiline ticket #{}: desc={:?}, room={:?}, qty={} (consumed {} lines)",
+                ticket_number, description, room, qty, lines_consumed);
+
+            // If standalone number yielded no useful data, it's likely a garbled room/qty — skip
+            if description.is_none() && room.is_none() {
+                skipped_lines += 1;
+                i += lines_consumed;
+                continue;
+            }
+
+        } else {
+            // *** SINGLE-LINE FORMAT: ticket number + description on same line ***
+
+            // Filter out bogus "ticket numbers" that are actually zip codes or street addresses
+            let rest_of_line = parts[1..].join(" ").to_lowercase();
+            // 5-digit numbers not starting with 0 are likely zip codes when followed by garbled/address text
+            if first.len() == 5 && !first.starts_with('0') {
+                let has_address_word = rest_of_line.contains("loop") || rest_of_line.contains("street")
+                    || rest_of_line.contains(" ave ") || rest_of_line.contains("blvd")
+                    || rest_of_line.contains("unit ") || rest_of_line.contains("suite")
+                    || rest_of_line.contains(" nw") || rest_of_line.contains(" sw")
+                    || rest_of_line.contains(" ne,") || rest_of_line.contains(" se,");
+                // Also check for garbled text: high ratio of non-alphabetic chars
+                let alpha_count = rest_of_line.chars().filter(|c| c.is_ascii_alphabetic()).count();
+                let total_count = rest_of_line.len().max(1);
+                let is_garbled = (alpha_count as f32 / total_count as f32) < 0.5;
+                if has_address_word || is_garbled {
+                    skipped_lines += 1;
+                    i += 1;
+                    continue;
+                }
+            }
+            // 3-digit numbers followed by address words ("230 Cynthia Loop NW")
+            if first.len() <= 4 && !first.starts_with('0') {
+                let has_address_word = rest_of_line.contains("loop") || rest_of_line.contains("street")
+                    || rest_of_line.contains(" ave ") || rest_of_line.contains("blvd")
+                    || rest_of_line.contains("unit") || rest_of_line.contains("suite")
+                    || rest_of_line.contains(" nw") || rest_of_line.contains(" sw")
+                    || rest_of_line.contains("cynthia") || rest_of_line.contains("drive")
+                    || rest_of_line.contains("road") || rest_of_line.contains("lane");
+                if has_address_word {
+                    skipped_lines += 1;
+                    i += 1;
+                    continue;
+                }
+                // Also skip short non-zero-leading numbers with garbled descriptions
+                let alpha_count = rest_of_line.chars().filter(|c| c.is_ascii_alphabetic()).count();
+                let total_count = rest_of_line.len().max(1);
+                if (alpha_count as f32 / total_count as f32) < 0.4 {
+                    skipped_lines += 1;
+                    i += 1;
+                    continue;
+                }
+            }
+
+            // --- Room/Qty extraction using trailing digit analysis ---
+            // PDF columns (ticket#, description, style, room#, qty) merge together in text extraction.
+            // The last 4+ consecutive digits at end of line encode: room_number (3 digits) + qty (1 digit)
+            let full_line = parts[1..].join(" ");
+            let line_bytes = full_line.as_bytes();
+            let line_len = full_line.len();
+
+            // Walk backwards from end to find trailing consecutive digits
+            let mut digit_start = line_len;
+            while digit_start > 0 && line_bytes[digit_start - 1].is_ascii_digit() {
+                digit_start -= 1;
+            }
+            let trailing_digits = &full_line[digit_start..];
+
+            let mut extracted = false;
+            if trailing_digits.len() >= 4 {
+                let split = trailing_digits.len() - 1;
+                let room_str = &trailing_digits[..split];
+                if let Ok(q) = trailing_digits[split..].parse::<i32>() {
+                    if let Ok(room_num) = room_str.parse::<i32>() {
+                        if q >= 1 && q <= 9 && room_num >= 100 && room_num <= 999 {
+                            room = Some(room_str.to_string());
+                            qty = q;
+                            extracted = true;
+                            // Description: everything before trailing digits, strip trailing comma/space
+                            let desc_raw = &full_line[..digit_start];
+                            let desc_clean = desc_raw.trim_end().trim_end_matches(',').trim_end();
+                            description = if desc_clean.is_empty() { None } else { Some(desc_clean.to_string()) };
+                        }
+                    }
+                }
+            }
+
+            if !extracted {
+                // Fallback: try parsing last whitespace-separated tokens as qty and room
+                let mut end_idx = parts.len();
+                // Last token might be qty (small integer 1-9)
+                if let Ok(q) = parts[parts.len() - 1].parse::<i32>() {
+                    if q >= 1 && q <= 9 {
+                        qty = q;
+                        end_idx -= 1;
+                    }
+                }
+                // Second-to-last might be a 3-digit room number
+                if end_idx > 2 {
+                    let potential_room = parts[end_idx - 1];
+                    if potential_room.len() == 3 && potential_room.chars().all(|c| c.is_ascii_digit()) {
+                        if let Ok(r) = potential_room.parse::<i32>() {
+                            if r >= 100 && r <= 999 {
+                                room = Some(potential_room.to_string());
+                                end_idx -= 1;
+                            }
+                        }
+                    }
+                }
+                let desc_parts: Vec<&str> = parts[1..end_idx].to_vec();
+                description = if desc_parts.is_empty() { None } else { Some(desc_parts.join(" ")) };
             }
         }
-
-        // Everything between ticket number and room/qty is description
-        let desc_parts: Vec<&str> = parts[1..end_idx].to_vec();
-        let description = if desc_parts.is_empty() {
-            None
-        } else {
-            Some(desc_parts.join(" "))
-        };
 
         // Skip if "See inside" or similar non-item descriptions
         if let Some(ref d) = description {
-            if d.to_lowercase().contains("see inside") { continue; }
+            if d.to_lowercase().contains("see inside") { i += lines_consumed; continue; }
         }
 
+        // Deduplicate: if we already have this ticket number, keep the one with the better data
+        if let Some(&existing_idx) = seen.get(&ticket_number) {
+            let existing = &tickets[existing_idx];
+            let existing_desc_len = existing.3.as_ref().map_or(0, |d| d.len());
+            let new_desc_len = description.as_ref().map_or(0, |d| d.len());
+            let existing_has_room = existing.4.is_some();
+            let new_has_room = room.is_some();
+            // Prefer entry with: room > no room, then longer description, then higher qty
+            let replace = (!existing_has_room && new_has_room)
+                || (existing_has_room == new_has_room && new_desc_len > existing_desc_len);
+            if replace {
+                tracing::debug!("[PDF:tickets] Dedup ticket {} — replacing (desc={}chars, room={:?}) with (desc={}chars, room={:?})",
+                    ticket_number, existing_desc_len, existing.4, new_desc_len, room);
+                tickets[existing_idx] = (
+                    job_id.to_string(),
+                    file_uuid.to_string(),
+                    ticket_number,
+                    description,
+                    room,
+                    qty,
+                    current_section.clone(),
+                );
+            } else {
+                tracing::debug!("[PDF:tickets] Dedup ticket {} — keeping existing (desc={}chars, room={:?})",
+                    ticket_number, existing_desc_len, existing.4);
+            }
+            i += lines_consumed;
+            continue;
+        }
+
+        tracing::debug!("[PDF:tickets] Ticket #{}: desc={:?}, room={:?}, qty={}",
+            ticket_number, description, room, qty);
+
+        let idx = tickets.len();
+        seen.insert(ticket_number.clone(), idx);
         tickets.push((
             job_id.to_string(),
             file_uuid.to_string(),
@@ -3268,10 +3888,14 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
             qty,
             current_section.clone(),
         ));
+
+        i += lines_consumed;
     }
 
-    tracing::info!("[PDF:tickets] Parsed {} tickets from '{}' ({} lines, {} skipped, section: {:?})",
-        tickets.len(), file_name, total_lines, skipped_lines, current_section);
+    let dedup_count = (raw_line_count as u32).saturating_sub(skipped_lines).saturating_sub(tickets.len() as u32);
+    tracing::info!("[PDF:tickets] Parsed {} unique tickets from '{}' ({} lines, {} skipped, {} duplicates filtered, section: {:?})",
+        tickets.len(), file_name, raw_line_count, skipped_lines,
+        dedup_count, current_section);
 
     if tickets.is_empty() && total_lines > 5 {
         // Log a sample of lines to help diagnose why no tickets were found
@@ -3281,6 +3905,85 @@ fn parse_lading_tickets(text: &str, job_id: &str, file_uuid: &str, file_name: &s
     }
 
     tickets
+}
+
+/// POST /api/jobs/:job_id/files/:file_uuid/reparse - Re-extract and re-parse lading tickets from a stored PDF
+pub async fn reparse_job_file(
+    State(state): State<SharedState>,
+    Path((job_id, file_uuid)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<ReparseResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+
+    // Get the PDF blob from DB
+    let (file_name, _content_type, file_data) = state.repo.get_job_file_data(&file_uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::error("File not found"))))?;
+
+    tracing::info!("[PDF:reparse] Re-parsing '{}' ({} bytes) for job {}", file_name, file_data.len(), job_id);
+
+    // Re-extract text from PDF
+    let extracted_text = extract_pdf_text(&file_data, &file_name);
+
+    if extracted_text.is_none() {
+        return Ok(Json(ApiResponse::success_with_message(
+            ReparseResponse { tickets_deleted: 0, tickets_inserted: 0, tickets: Vec::new(), extracted_text: None },
+            "No text could be extracted from PDF".to_string(),
+        )));
+    }
+
+    let text = extracted_text.unwrap();
+
+    // Delete old tickets for this file
+    let deleted = state.repo.delete_lading_tickets_for_file(&file_uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    tracing::info!("[PDF:reparse] Deleted {} old tickets for file {}", deleted, file_uuid);
+
+    // Re-parse tickets
+    let ticket_tuples = parse_lading_tickets(&text, &job_id, &file_uuid, &file_name);
+    let _ticket_count = ticket_tuples.len();
+
+    // Build response tickets before consuming the tuples
+    let response_tickets: Vec<ReparseTicket> = ticket_tuples.iter().map(|t| ReparseTicket {
+        ticket_number: t.2.clone(),
+        description: t.3.clone(),
+        room: t.4.clone(),
+        qty: t.5,
+        section: t.6.clone(),
+    }).collect();
+
+    // Insert new tickets
+    let inserted = if !ticket_tuples.is_empty() {
+        state.repo.insert_lading_tickets(&ticket_tuples).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?
+    } else {
+        0
+    };
+
+    tracing::info!("[PDF:reparse] Inserted {} new tickets from '{}' (deleted {} old)", inserted, file_name, deleted);
+
+    Ok(Json(ApiResponse::success(ReparseResponse {
+        tickets_deleted: deleted,
+        tickets_inserted: inserted as u64,
+        tickets: response_tickets,
+        extracted_text: Some(text),
+    })))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReparseResponse {
+    pub tickets_deleted: u64,
+    pub tickets_inserted: u64,
+    pub tickets: Vec<ReparseTicket>,
+    pub extracted_text: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReparseTicket {
+    pub ticket_number: String,
+    pub description: Option<String>,
+    pub room: Option<String>,
+    pub qty: i32,
+    pub section: Option<String>,
 }
 
 /// GET /api/jobs/:job_id/lading-tickets - List all lading tickets for a job

@@ -442,13 +442,18 @@ impl Repository {
         let mut result = Vec::new();
 
         for job in jobs {
-            let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans WHERE job_id = ?")
+            let scan_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans WHERE job_id = ?")
                 .bind(job.id)
+                .fetch_one(&self.pool)
+                .await?;
+            let file_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM job_files WHERE job_id = ?")
+                .bind(&job.uuid)
                 .fetch_one(&self.pool)
                 .await?;
             result.push(JobWithCount {
                 job,
-                scan_count: count.0 as i32,
+                scan_count: scan_count.0 as i32,
+                file_count: file_count.0 as i32,
             });
         }
 
@@ -2035,6 +2040,16 @@ impl Repository {
     /// Delete a team member
     pub async fn delete_team_member(&self, device_id: &str) -> anyhow::Result<bool> {
         let result = sqlx::query("DELETE FROM team_members WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update role for a team member
+    pub async fn set_team_member_role(&self, device_id: &str, role: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE team_members SET role = ? WHERE device_id = ?")
+            .bind(role)
             .bind(device_id)
             .execute(&self.pool)
             .await?;

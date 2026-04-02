@@ -116,6 +116,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/jobs/:job_id/files", post(handlers::upload_job_file))
         .route("/api/jobs/:job_id/files/:file_uuid", get(handlers::download_job_file))
         .route("/api/jobs/:job_id/files/:file_uuid", delete(handlers::delete_job_file))
+        .route("/api/jobs/:job_id/files/:file_uuid/reparse", post(handlers::reparse_job_file))
         // Lading Tickets (parsed from shipping PDFs)
         .route("/api/jobs/:job_id/lading-tickets", get(handlers::get_lading_tickets))
         .route("/api/lading-tickets/:ticket_number", get(handlers::get_ticket_description))
