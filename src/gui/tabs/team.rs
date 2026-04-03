@@ -204,25 +204,19 @@ impl TeamTab {
             let mut delete_request: Option<String> = None;
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Responsive rectangular grid
                 let card_width = 300.0_f32;
                 let card_h_margin = 12.0_f32;
                 let card_stroke = 2.0_f32;
-                let item_spacing = ui.spacing().item_spacing.x;
-                let card_outer = card_width + (card_h_margin + card_stroke) * 2.0 + item_spacing;
                 let spacing = 12.0_f32;
-                let available = ui.available_width();
-                let cols = ((available) / card_outer).floor().max(1.0) as usize;
 
-                let chunks: Vec<&[TeamMemberStatus]> = filtered.chunks(cols).collect();
-                for row in chunks {
-                    ui.horizontal(|ui| {
-                        for member in row {
-                            let border_color = match member.status.as_str() {
-                                "working" => egui::Color32::from_rgb(34, 197, 94),
-                                "break" => egui::Color32::from_rgb(251, 191, 36),
-                                _ => egui::Color32::from_rgb(60, 60, 80),
-                            };
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
+                    for member in &filtered {
+                        let border_color = match member.status.as_str() {
+                            "working" => egui::Color32::from_rgb(34, 197, 94),
+                            "break" => egui::Color32::from_rgb(251, 191, 36),
+                            _ => egui::Color32::from_rgb(60, 60, 80),
+                        };
 
                             egui::Frame::none()
                                 .fill(egui::Color32::from_rgb(40, 40, 58))
@@ -412,13 +406,9 @@ impl TeamTab {
                                         }
                                     });
                                 });
-
-                            ui.add_space(spacing);
                         }
                     });
-                    ui.add_space(spacing);
-                }
-            });
+                });
 
             // Apply role change
             if let Some((device_id, new_role)) = role_change {
