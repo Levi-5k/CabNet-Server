@@ -208,10 +208,11 @@ impl TeamTab {
                 let card_width = 300.0_f32;
                 let card_h_margin = 12.0_f32;
                 let card_stroke = 2.0_f32;
-                let card_outer = card_width + (card_h_margin + card_stroke) * 2.0;
+                let item_spacing = ui.spacing().item_spacing.x;
+                let card_outer = card_width + (card_h_margin + card_stroke) * 2.0 + item_spacing;
                 let spacing = 12.0_f32;
                 let available = ui.available_width();
-                let cols = ((available + spacing) / (card_outer + spacing)).floor().max(1.0) as usize;
+                let cols = ((available) / card_outer).floor().max(1.0) as usize;
 
                 let chunks: Vec<&[TeamMemberStatus]> = filtered.chunks(cols).collect();
                 for row in chunks {
@@ -330,7 +331,7 @@ impl TeamTab {
                                     ui.separator();
                                     ui.add_space(4.0);
 
-                                    // ── Role + Admin + Delete row ──
+                                    // ── Role row ──
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new("Role:")
@@ -366,9 +367,12 @@ impl TeamTab {
                                                 current_role,
                                             ));
                                         }
+                                    });
 
-                                        ui.add_space(4.0);
+                                    ui.add_space(2.0);
 
+                                    // ── Admin + Delete row ──
+                                    ui.horizontal(|ui| {
                                         // Admin toggle
                                         let (admin_label, admin_color) = if member.is_admin {
                                             ("👑 Admin", egui::Color32::from_rgb(251, 191, 36))
@@ -391,26 +395,21 @@ impl TeamTab {
                                                 Some((member.device_id.clone(), !member.is_admin));
                                         }
 
-                                        // Delete button pushed right
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let del_btn = egui::Button::new(
-                                                    egui::RichText::new("🗑")
-                                                        .size(13.0)
-                                                        .color(egui::Color32::from_rgb(239, 68, 68)),
-                                                )
-                                                .fill(egui::Color32::TRANSPARENT);
-                                                if ui
-                                                    .add(del_btn)
-                                                    .on_hover_text("Delete member")
-                                                    .clicked()
-                                                {
-                                                    delete_request =
-                                                        Some(member.device_id.clone());
-                                                }
-                                            },
-                                        );
+                                        // Delete button
+                                        let del_btn = egui::Button::new(
+                                            egui::RichText::new("🗑")
+                                                .size(13.0)
+                                                .color(egui::Color32::from_rgb(239, 68, 68)),
+                                        )
+                                        .fill(egui::Color32::TRANSPARENT);
+                                        if ui
+                                            .add(del_btn)
+                                            .on_hover_text("Delete member")
+                                            .clicked()
+                                        {
+                                            delete_request =
+                                                Some(member.device_id.clone());
+                                        }
                                     });
                                 });
 
