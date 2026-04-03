@@ -205,10 +205,13 @@ impl TeamTab {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Responsive rectangular grid
-                let card_width = 280.0_f32;
+                let card_width = 300.0_f32;
+                let card_h_margin = 12.0_f32;
+                let card_stroke = 2.0_f32;
+                let card_outer = card_width + (card_h_margin + card_stroke) * 2.0;
                 let spacing = 12.0_f32;
                 let available = ui.available_width();
-                let cols = ((available + spacing) / (card_width + spacing)).floor().max(1.0) as usize;
+                let cols = ((available + spacing) / (card_outer + spacing)).floor().max(1.0) as usize;
 
                 let chunks: Vec<&[TeamMemberStatus]> = filtered.chunks(cols).collect();
                 for row in chunks {
@@ -223,13 +226,13 @@ impl TeamTab {
                             egui::Frame::none()
                                 .fill(egui::Color32::from_rgb(40, 40, 58))
                                 .rounding(egui::Rounding::same(12.0))
-                                .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-                                .stroke(egui::Stroke::new(2.0, border_color))
+                                .inner_margin(egui::Margin::symmetric(card_h_margin, 10.0))
+                                .stroke(egui::Stroke::new(card_stroke, border_color))
                                 .show(ui, |ui| {
-                                    ui.set_width(card_width - 32.0); // inner width
-                                    ui.set_min_height(160.0);
+                                    ui.set_width(card_width);
+                                    ui.set_max_width(card_width);
 
-                                    // ── Top row: avatar + name + status ──
+                                    // ── Top row: avatar + name + info ──
                                     ui.horizontal(|ui| {
                                         // Avatar circle
                                         let avatar_color = member
@@ -257,90 +260,77 @@ impl TeamTab {
                                             .to_uppercase();
 
                                         let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(44.0, 44.0),
+                                            egui::vec2(36.0, 36.0),
                                             egui::Sense::hover(),
                                         );
-                                        ui.painter().circle_filled(rect.center(), 22.0, avatar_color);
+                                        ui.painter().circle_filled(rect.center(), 18.0, avatar_color);
                                         ui.painter().text(
                                             rect.center(),
                                             egui::Align2::CENTER_CENTER,
                                             &initials,
-                                            egui::FontId::proportional(15.0),
+                                            egui::FontId::proportional(13.0),
                                             egui::Color32::WHITE,
                                         );
 
-                                        ui.add_space(8.0);
+                                        ui.add_space(6.0);
 
                                         ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(&member.display_name)
-                                                    .size(15.0)
-                                                    .strong()
-                                                    .color(egui::Color32::WHITE),
-                                            );
-
-                                            // Status badge
-                                            if member.status == "working" || member.status == "break" {
-                                                let (status_icon, status_text, status_color) =
-                                                    match member.status.as_str() {
-                                                        "working" => (
-                                                            "🟢",
-                                                            "Working",
-                                                            egui::Color32::from_rgb(34, 197, 94),
-                                                        ),
-                                                        _ => (
-                                                            "☕",
-                                                            "On Break",
-                                                            egui::Color32::from_rgb(251, 191, 36),
-                                                        ),
-                                                    };
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(&member.display_name)
+                                                        .size(14.0)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                                if let Some(ref job) = member.current_job {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("📋 {}", job))
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                                                    );
+                                                }
                                                 ui.label(
                                                     egui::RichText::new(format!(
-                                                        "{} {}",
-                                                        status_icon, status_text
+                                                        "📊 {} scans today",
+                                                        member.total_scans_today
                                                     ))
                                                     .size(11.0)
-                                                    .color(status_color),
-                                                );
-                                            } else {
-                                                ui.label(
-                                                    egui::RichText::new("⚫ Offline")
-                                                        .size(11.0)
-                                                        .color(egui::Color32::from_rgb(107, 114, 128)),
-                                                );
-                                            }
-                                        });
-                                    });
-
-                                    ui.add_space(8.0);
-
-                                    // ── Info rows ──
-                                    if let Some(ref job) = member.current_job {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("📋 {}", job))
-                                                    .size(11.0)
                                                     .color(egui::Color32::from_rgb(148, 163, 184)),
+                                                );
+                                            });
+
+                                            // Status badge
+                                            let (status_icon, status_text, status_color) =
+                                                match member.status.as_str() {
+                                                    "working" => (
+                                                        "🟢",
+                                                        "Working",
+                                                        egui::Color32::from_rgb(34, 197, 94),
+                                                    ),
+                                                    "break" => (
+                                                        "☕",
+                                                        "On Break",
+                                                        egui::Color32::from_rgb(251, 191, 36),
+                                                    ),
+                                                    _ => (
+                                                        "⚫",
+                                                        "Offline",
+                                                        egui::Color32::from_rgb(107, 114, 128),
+                                                    ),
+                                                };
+                                            ui.label(
+                                                egui::RichText::new(format!("{} {}", status_icon, status_text))
+                                                    .size(11.0)
+                                                    .color(status_color),
                                             );
                                         });
-                                    }
-
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "📊 {} scans today",
-                                                member.total_scans_today
-                                            ))
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(148, 163, 184)),
-                                        );
                                     });
 
                                     ui.add_space(4.0);
                                     ui.separator();
                                     ui.add_space(4.0);
 
-                                    // ── Role selector ──
+                                    // ── Role + Admin + Delete row ──
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new("Role:")
@@ -352,7 +342,7 @@ impl TeamTab {
                                         let prev_role = current_role.clone();
                                         egui::ComboBox::from_id_source(&combo_id)
                                             .selected_text(&current_role)
-                                            .width(100.0)
+                                            .width(80.0)
                                             .show_ui(ui, |ui| {
                                                 ui.selectable_value(
                                                     &mut current_role,
@@ -376,17 +366,14 @@ impl TeamTab {
                                                 current_role,
                                             ));
                                         }
-                                    });
 
-                                    ui.add_space(4.0);
+                                        ui.add_space(4.0);
 
-                                    // ── Admin toggle + delete row ──
-                                    ui.horizontal(|ui| {
                                         // Admin toggle
                                         let (admin_label, admin_color) = if member.is_admin {
                                             ("👑 Admin", egui::Color32::from_rgb(251, 191, 36))
                                         } else {
-                                            ("   User  ", egui::Color32::from_rgb(107, 114, 128))
+                                            ("User", egui::Color32::from_rgb(107, 114, 128))
                                         };
                                         let admin_btn = egui::Button::new(
                                             egui::RichText::new(admin_label)
@@ -404,17 +391,16 @@ impl TeamTab {
                                                 Some((member.device_id.clone(), !member.is_admin));
                                         }
 
-                                        // Spacer to push delete to right
+                                        // Delete button pushed right
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 let del_btn = egui::Button::new(
                                                     egui::RichText::new("🗑")
-                                                        .size(14.0)
+                                                        .size(13.0)
                                                         .color(egui::Color32::from_rgb(239, 68, 68)),
                                                 )
-                                                .fill(egui::Color32::TRANSPARENT)
-                                                .rounding(egui::Rounding::same(4.0));
+                                                .fill(egui::Color32::TRANSPARENT);
                                                 if ui
                                                     .add(del_btn)
                                                     .on_hover_text("Delete member")
