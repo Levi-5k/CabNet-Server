@@ -1121,19 +1121,21 @@ pub async fn device_connect(
         )
     })?;
 
-    // Auto-register as team member if user_name is provided
+    // Update existing team member's display name if they are already registered
     if let Some(ref user_name) = request.user_name {
         if !user_name.trim().is_empty() {
-            let team_input = crate::db::models::TeamMemberInput {
-                device_id: request.device_id.clone(),
-                display_name: user_name.trim().to_string(),
-                phone_number: request.phone_number.clone(),
-                role: None,
-                is_admin: None,
-                avatar_color: None,
-            };
-            if let Err(e) = state.repo.upsert_team_member(&team_input).await {
-                tracing::warn!("Failed to auto-register team member: {}", e);
+            if let Ok(Some(_)) = state.repo.get_team_member_by_device(&device_id).await {
+                let team_input = crate::db::models::TeamMemberInput {
+                    device_id: request.device_id.clone(),
+                    display_name: user_name.trim().to_string(),
+                    phone_number: request.phone_number.clone(),
+                    role: None,
+                    is_admin: None,
+                    avatar_color: None,
+                };
+                if let Err(e) = state.repo.upsert_team_member(&team_input).await {
+                    tracing::warn!("Failed to update team member: {}", e);
+                }
             }
         }
     }
@@ -2201,6 +2203,12 @@ pub async fn delete_team_member(
     Path(device_id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+
+    // Close any open time entries for this device before deleting
+    if let Err(e) = state.repo.close_open_time_entries(&device_id).await {
+        tracing::warn!("Failed to close open time entries for {}: {}", device_id, e);
+    }
+
     let deleted = state.repo.delete_team_member(&device_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
     if deleted {

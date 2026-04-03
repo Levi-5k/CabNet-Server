@@ -2072,6 +2072,19 @@ impl Repository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Close all open time entries for a device (set clock_out to now)
+    pub async fn close_open_time_entries(&self, device_id: &str) -> anyhow::Result<u64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE time_entries SET clock_out = ? WHERE device_id = ? AND clock_out IS NULL"
+        )
+        .bind(&now)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Update role for a team member
     pub async fn set_team_member_role(&self, device_id: &str, role: &str) -> anyhow::Result<bool> {
         let result = sqlx::query("UPDATE team_members SET role = ? WHERE device_id = ?")

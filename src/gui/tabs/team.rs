@@ -507,6 +507,7 @@ impl TeamTab {
                             let s = state.clone();
                             runtime.block_on(async {
                                 let state = s.read().await;
+                                let _ = state.repo.close_open_time_entries(&did).await;
                                 let _ = state.repo.delete_team_member(&did).await;
                             });
                             self.confirm_delete = None;
