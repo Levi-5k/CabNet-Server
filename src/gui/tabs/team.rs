@@ -209,9 +209,14 @@ impl TeamTab {
                 let card_stroke = 2.0_f32;
                 let spacing = 12.0_f32;
 
-                ui.horizontal_wrapped(|ui| {
+                let avail = ui.available_width();
+                let full_card = card_width + (card_h_margin + card_stroke) * 2.0;
+                let cols = ((avail + spacing) / (full_card + spacing)).floor().max(1.0) as usize;
+
+                for row in filtered.chunks(cols) {
+                    ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
-                    for member in &filtered {
+                    for member in row {
                         let border_color = match member.status.as_str() {
                             "working" => egui::Color32::from_rgb(34, 197, 94),
                             "break" => egui::Color32::from_rgb(251, 191, 36),
@@ -284,14 +289,6 @@ impl TeamTab {
                                                             .color(egui::Color32::from_rgb(148, 163, 184)),
                                                     );
                                                 }
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "📊 {} scans today",
-                                                        member.total_scans_today
-                                                    ))
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
-                                                );
                                             });
 
                                             // Status badge
@@ -408,7 +405,8 @@ impl TeamTab {
                                 });
                         }
                     });
-                });
+                }
+            });
 
             // Apply role change
             if let Some((device_id, new_role)) = role_change {
