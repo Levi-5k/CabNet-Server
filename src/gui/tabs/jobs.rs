@@ -54,6 +54,25 @@ impl Default for JobsTab {
 }
 
 impl JobsTab {
+    fn stat_card(ui: &mut egui::Ui, icon: &str, label: &str, value: &str, color: egui::Color32) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(140.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(icon).size(20.0));
+                    ui.label(egui::RichText::new(value).size(22.0).strong().color(color));
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+            });
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -68,44 +87,22 @@ impl JobsTab {
         let card_border = egui::Color32::from_rgb(80, 80, 110);
         let muted = egui::Color32::from_rgb(160, 160, 190);
 
+        // Header
         ui.horizontal(|ui| {
-            ui.heading("Jobs");
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("📋").size(28.0));
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Jobs").size(24.0).strong());
+                ui.label(egui::RichText::new("Manage and track scanning jobs").size(13.0).color(egui::Color32::from_rgb(148, 163, 184)));
+            });
 
-            // Right-aligned controls
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Status filter
-                ui.label("Status:");
-                ui.add_space(4.0);
-                egui::ComboBox::from_id_source("job_filter")
-                    .selected_text(if self.filter_status.is_empty() {
-                        "All"
-                    } else {
-                        &self.filter_status
-                    })
-                    .width(100.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.filter_status, String::new(), "All");
-                        ui.selectable_value(&mut self.filter_status, "PENDING".to_string(), "Pending");
-                        ui.selectable_value(&mut self.filter_status, "ACTIVE".to_string(), "Active");
-                        ui.selectable_value(&mut self.filter_status, "COMPLETED".to_string(), "Completed");
-                        ui.selectable_value(&mut self.filter_status, "CANCELLED".to_string(), "Cancelled");
-                    });
-
-                ui.add_space(16.0);
-
-                // Search box
-                ui.label("🔍");
-                ui.add_space(4.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("Search jobs...")
-                        .desired_width(150.0),
-                );
-
-                ui.add_space(16.0);
-
-                // New Job button
-                if ui.button("➕ New Job").clicked() {
+                let new_btn = egui::Button::new(egui::RichText::new("➕ New Job").color(egui::Color32::WHITE).size(14.0))
+                    .fill(accent)
+                    .rounding(egui::Rounding::same(8.0))
+                    .min_size(egui::vec2(130.0, 36.0));
+                if ui.add(new_btn).clicked() {
                     self.show_create_dialog = true;
                     self.new_job_name.clear();
                     self.new_job_description.clear();
@@ -114,7 +111,64 @@ impl JobsTab {
             });
         });
 
-        ui.separator();
+        ui.add_space(20.0);
+
+        // Stats
+        let total_jobs = data.jobs.len();
+        let active_jobs = data.jobs.iter().filter(|j| j.status == "ACTIVE").count();
+        let pending_jobs = data.jobs.iter().filter(|j| j.status == "PENDING").count();
+        let completed_jobs = data.jobs.iter().filter(|j| j.status == "COMPLETED").count();
+        ui.horizontal(|ui| {
+            Self::stat_card(ui, "📋", "Total", &total_jobs.to_string(), egui::Color32::from_rgb(99, 102, 241));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "🟢", "Active", &active_jobs.to_string(), egui::Color32::from_rgb(34, 197, 94));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "⏳", "Pending", &pending_jobs.to_string(), egui::Color32::from_rgb(251, 191, 36));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "✅", "Completed", &completed_jobs.to_string(), egui::Color32::from_rgb(33, 150, 243));
+        });
+
+        ui.add_space(20.0);
+
+        // Toolbar
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🔍").size(16.0));
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("Search jobs...")
+                            .desired_width(200.0),
+                    );
+
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(20.0);
+
+                    ui.label("Status:");
+                    ui.add_space(4.0);
+                    egui::ComboBox::from_id_source("job_filter")
+                        .selected_text(if self.filter_status.is_empty() {
+                            "All"
+                        } else {
+                            &self.filter_status
+                        })
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.filter_status, String::new(), "All");
+                            ui.selectable_value(&mut self.filter_status, "PENDING".to_string(), "Pending");
+                            ui.selectable_value(&mut self.filter_status, "ACTIVE".to_string(), "Active");
+                            ui.selectable_value(&mut self.filter_status, "COMPLETED".to_string(), "Completed");
+                            ui.selectable_value(&mut self.filter_status, "CANCELLED".to_string(), "Cancelled");
+                        });
+                });
+            });
+
+        ui.add_space(16.0);
 
         // Create job dialog
         if self.show_create_dialog {
@@ -201,16 +255,15 @@ impl JobsTab {
             .collect();
 
         if filtered_jobs.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    "No jobs found.\n\nClick 'New Job' to create one, or jobs will sync from the Android app.",
-                );
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(egui::RichText::new("📋").size(48.0));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("No jobs found").size(16.0).color(egui::Color32::from_rgb(148, 163, 184)));
+                ui.label(egui::RichText::new("Click 'New Job' to create one, or jobs will sync from the Android app.").size(13.0).color(egui::Color32::from_rgb(107, 114, 128)));
             });
             return needs_refresh;
         }
-
-        ui.label(format!("{} jobs", filtered_jobs.len()));
-        ui.separator();
 
         // Card grid
         let card_width = 260.0_f32;

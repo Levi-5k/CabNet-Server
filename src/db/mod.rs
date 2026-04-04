@@ -607,5 +607,10 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // Migration: Add user_id column to web_clients for linking to team members
+    let _ = sqlx::query("ALTER TABLE web_clients ADD COLUMN user_id TEXT")
+        .execute(pool)
+        .await;
+
     Ok(())
 }

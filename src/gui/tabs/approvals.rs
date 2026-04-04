@@ -1,7 +1,7 @@
 //! Approvals Tab - Manage pending changes and web clients
 
 use crate::api::routes::SharedState;
-use crate::db::models::{PendingChange, WebClient};
+use crate::db::models::{PendingChange, TeamMember, WebClient};
 use eframe::egui;
 
 /// View mode for the approvals tab
@@ -17,11 +17,14 @@ pub struct ApprovalsTab {
     pub view: ApprovalsView,
     pub pending_changes: Vec<PendingChange>,
     pub web_clients: Vec<WebClient>,
+    pub team_members: Vec<TeamMember>,
     pub pending_count: i64,
     pub last_refresh: Option<std::time::Instant>,
     pub selected_change: Option<i64>,
     pub expanded_change: Option<i64>,
     pub filter_entity_type: Option<String>,
+    /// client_id of the web client currently showing the link dropdown
+    pub linking_client_id: Option<String>,
 }
 
 impl Default for ApprovalsTab {
@@ -30,16 +33,37 @@ impl Default for ApprovalsTab {
             view: ApprovalsView::Pending,
             pending_changes: Vec::new(),
             web_clients: Vec::new(),
+            team_members: Vec::new(),
             pending_count: 0,
             last_refresh: None,
             selected_change: None,
             expanded_change: None,
             filter_entity_type: None,
+            linking_client_id: None,
         }
     }
 }
 
 impl ApprovalsTab {
+    fn stat_card(ui: &mut egui::Ui, icon: &str, label: &str, value: &str, color: egui::Color32) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(140.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(icon).size(20.0));
+                    ui.label(egui::RichText::new(value).size(22.0).strong().color(color));
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+            });
+    }
+
     /// Main UI render function
     pub fn ui(
         &mut self, 
@@ -58,71 +82,80 @@ impl ApprovalsTab {
             self.refresh_data(state, runtime);
         }
         
-        // Header with view toggle
+        // Header
         ui.horizontal(|ui| {
-            ui.heading("⚡ Approvals");
-            ui.add_space(16.0);
-            
-            // Pending badge
-            if self.pending_count > 0 {
-                ui.add_space(4.0);
-                let badge_color = egui::Color32::from_rgb(239, 68, 68);
-                egui::Frame::none()
-                    .fill(badge_color)
-                    .rounding(egui::Rounding::same(10.0))
-                    .inner_margin(egui::Margin::symmetric(8.0, 2.0))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} pending", self.pending_count))
-                                .color(egui::Color32::WHITE)
-                                .size(12.0)
-                                .strong()
-                        );
-                    });
-            }
-            
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // View toggle buttons
-                let pending_btn = egui::Button::new(
-                    egui::RichText::new("📝 Pending Changes")
-                        .color(if self.view == ApprovalsView::Pending { 
-                            egui::Color32::WHITE 
-                        } else { 
-                            egui::Color32::from_rgb(148, 163, 184) 
-                        })
-                )
-                .fill(if self.view == ApprovalsView::Pending {
-                    egui::Color32::from_rgb(99, 102, 241)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .rounding(egui::Rounding::same(6.0));
-                
-                if ui.add(pending_btn).clicked() {
-                    self.view = ApprovalsView::Pending;
-                }
-                
-                let clients_btn = egui::Button::new(
-                    egui::RichText::new("🌐 Web Clients")
-                        .color(if self.view == ApprovalsView::WebClients { 
-                            egui::Color32::WHITE 
-                        } else { 
-                            egui::Color32::from_rgb(148, 163, 184) 
-                        })
-                )
-                .fill(if self.view == ApprovalsView::WebClients {
-                    egui::Color32::from_rgb(99, 102, 241)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .rounding(egui::Rounding::same(6.0));
-                
-                if ui.add(clients_btn).clicked() {
-                    self.view = ApprovalsView::WebClients;
-                }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("⚡").size(28.0));
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Approvals").size(24.0).strong());
+                ui.label(egui::RichText::new("Manage pending changes and web clients").size(13.0).color(egui::Color32::from_rgb(148, 163, 184)));
             });
         });
-        
+
+        ui.add_space(20.0);
+
+        // Stats
+        ui.horizontal(|ui| {
+            Self::stat_card(ui, "📝", "Pending", &self.pending_count.to_string(), egui::Color32::from_rgb(251, 191, 36));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "🌐", "Web Clients", &self.web_clients.len().to_string(), egui::Color32::from_rgb(99, 102, 241));
+            ui.add_space(12.0);
+            let trusted = self.web_clients.iter().filter(|c| c.is_trusted != 0).count();
+            Self::stat_card(ui, "✅", "Trusted", &trusted.to_string(), egui::Color32::from_rgb(34, 197, 94));
+        });
+
+        ui.add_space(20.0);
+
+        // Toolbar with view toggle
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let pending_btn = egui::Button::new(
+                        egui::RichText::new("📝 Pending Changes")
+                            .color(if self.view == ApprovalsView::Pending { 
+                                egui::Color32::WHITE 
+                            } else { 
+                                egui::Color32::from_rgb(148, 163, 184) 
+                            })
+                    )
+                    .fill(if self.view == ApprovalsView::Pending {
+                        egui::Color32::from_rgb(99, 102, 241)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .rounding(egui::Rounding::same(6.0));
+                    
+                    if ui.add(pending_btn).clicked() {
+                        self.view = ApprovalsView::Pending;
+                    }
+                    
+                    ui.add_space(8.0);
+                    
+                    let clients_btn = egui::Button::new(
+                        egui::RichText::new("🌐 Web Clients")
+                            .color(if self.view == ApprovalsView::WebClients { 
+                                egui::Color32::WHITE 
+                            } else { 
+                                egui::Color32::from_rgb(148, 163, 184) 
+                            })
+                    )
+                    .fill(if self.view == ApprovalsView::WebClients {
+                        egui::Color32::from_rgb(99, 102, 241)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .rounding(egui::Rounding::same(6.0));
+                    
+                    if ui.add(clients_btn).clicked() {
+                        self.view = ApprovalsView::WebClients;
+                    }
+                });
+            });
+
         ui.add_space(16.0);
         
         // Content based on view
@@ -161,9 +194,15 @@ impl ApprovalsTab {
             state.repo.get_web_clients().await.unwrap_or_default()
         });
         
+        let members = runtime.block_on(async {
+            let state = state_clone.read().await;
+            state.repo.get_team_members().await.unwrap_or_default()
+        });
+        
         self.pending_changes = pending;
         self.pending_count = pending_count;
         self.web_clients = clients;
+        self.team_members = members;
         self.last_refresh = Some(std::time::Instant::now());
     }
     
@@ -429,6 +468,10 @@ impl ApprovalsTab {
             return false;
         }
         
+        // Clone what we need for iteration
+        let clients = self.web_clients.clone();
+        let members = self.team_members.clone();
+        
         // Clients table
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Header
@@ -441,7 +484,9 @@ impl ApprovalsTab {
                         ui.label(egui::RichText::new("Client").strong().color(egui::Color32::from_rgb(148, 163, 184)));
                         ui.add_space(100.0);
                         ui.label(egui::RichText::new("Status").strong().color(egui::Color32::from_rgb(148, 163, 184)));
-                        ui.add_space(60.0);
+                        ui.add_space(40.0);
+                        ui.label(egui::RichText::new("Linked User").strong().color(egui::Color32::from_rgb(148, 163, 184)));
+                        ui.add_space(40.0);
                         ui.label(egui::RichText::new("Last Seen").strong().color(egui::Color32::from_rgb(148, 163, 184)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(egui::RichText::new("Actions").strong().color(egui::Color32::from_rgb(148, 163, 184)));
@@ -452,7 +497,12 @@ impl ApprovalsTab {
             ui.add_space(8.0);
             
             // Client rows
-            for client in &self.web_clients.clone() {
+            for client in &clients {
+                let linked_member = client.user_id.as_ref().and_then(|uid| {
+                    members.iter().find(|m| m.device_id == *uid)
+                });
+                let is_linking = self.linking_client_id.as_ref() == Some(&client.client_id);
+                
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(30, 41, 59))
                     .rounding(egui::Rounding::same(8.0))
@@ -497,7 +547,30 @@ impl ApprovalsTab {
                                     );
                                 });
                             
-                            ui.add_space(40.0);
+                            ui.add_space(20.0);
+                            
+                            // Linked team member
+                            if let Some(member) = linked_member {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgb(99, 102, 241).linear_multiply(0.2))
+                                    .rounding(egui::Rounding::same(4.0))
+                                    .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("👤 {}", member.display_name))
+                                                .color(egui::Color32::from_rgb(165, 180, 252))
+                                                .size(12.0)
+                                        );
+                                    });
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("—")
+                                        .color(egui::Color32::from_rgb(100, 116, 139))
+                                        .size(12.0)
+                                );
+                            }
+                            
+                            ui.add_space(20.0);
                             
                             // Last seen
                             if let Some(ref last_seen) = client.last_seen_at {
@@ -522,6 +595,37 @@ impl ApprovalsTab {
                                         let _ = state.repo.delete_web_client(&client_id).await;
                                     });
                                     needs_refresh = true;
+                                }
+                                
+                                ui.add_space(8.0);
+                                
+                                // Link/Unlink button
+                                if linked_member.is_some() {
+                                    let unlink_btn = egui::Button::new(
+                                        egui::RichText::new("🔗 Unlink").color(egui::Color32::WHITE)
+                                    )
+                                    .fill(egui::Color32::from_rgb(239, 68, 68))
+                                    .rounding(egui::Rounding::same(6.0));
+                                    
+                                    if ui.add(unlink_btn).on_hover_text("Unlink from team member").clicked() {
+                                        let state_clone = state.clone();
+                                        let client_id = client.client_id.clone();
+                                        runtime.block_on(async {
+                                            let state = state_clone.read().await;
+                                            let _ = state.repo.unlink_web_client_user(&client_id).await;
+                                        });
+                                        needs_refresh = true;
+                                    }
+                                } else {
+                                    let link_btn = egui::Button::new(
+                                        egui::RichText::new("🔗 Link").color(egui::Color32::WHITE)
+                                    )
+                                    .fill(egui::Color32::from_rgb(99, 102, 241))
+                                    .rounding(egui::Rounding::same(6.0));
+                                    
+                                    if ui.add(link_btn).on_hover_text("Link to a team member").clicked() {
+                                        self.linking_client_id = if is_linking { None } else { Some(client.client_id.clone()) };
+                                    }
                                 }
                                 
                                 ui.add_space(8.0);
@@ -551,6 +655,60 @@ impl ApprovalsTab {
                                 }
                             });
                         });
+                        
+                        // Team member selection dropdown (shown when Link is clicked)
+                        if is_linking && !members.is_empty() {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                            
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Select team member:")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(148, 163, 184))
+                                );
+                            });
+                            
+                            ui.add_space(4.0);
+                            
+                            // Show team member buttons in a horizontal wrap
+                            ui.horizontal_wrapped(|ui| {
+                                for member in &members {
+                                    let member_btn = egui::Button::new(
+                                        egui::RichText::new(format!("👤 {} ({})", member.display_name, member.role))
+                                            .color(egui::Color32::WHITE)
+                                            .size(12.0)
+                                    )
+                                    .fill(egui::Color32::from_rgb(55, 65, 81))
+                                    .rounding(egui::Rounding::same(6.0));
+                                    
+                                    if ui.add(member_btn).clicked() {
+                                        let state_clone = state.clone();
+                                        let client_id = client.client_id.clone();
+                                        let device_id = member.device_id.clone();
+                                        runtime.block_on(async {
+                                            let state = state_clone.read().await;
+                                            let _ = state.repo.link_web_client_to_user(&client_id, &device_id).await;
+                                        });
+                                        self.linking_client_id = None;
+                                        needs_refresh = true;
+                                    }
+                                }
+                                
+                                // Cancel button
+                                let cancel_btn = egui::Button::new(
+                                    egui::RichText::new("✕ Cancel")
+                                        .color(egui::Color32::from_rgb(148, 163, 184))
+                                        .size(12.0)
+                                )
+                                .fill(egui::Color32::TRANSPARENT);
+                                
+                                if ui.add(cancel_btn).clicked() {
+                                    self.linking_client_id = None;
+                                }
+                            });
+                        }
                     });
                 
                 ui.add_space(8.0);

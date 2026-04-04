@@ -1091,6 +1091,25 @@ impl Repository {
         Ok(())
     }
 
+    /// Link a web client to a team member via user_id (device_id from team_members)
+    pub async fn link_web_client_to_user(&self, client_id: &str, user_id: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE web_clients SET user_id = ? WHERE client_id = ?")
+            .bind(user_id)
+            .bind(client_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Unlink a web client from any team member
+    pub async fn unlink_web_client_user(&self, client_id: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE web_clients SET user_id = NULL WHERE client_id = ?")
+            .bind(client_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ==================== PENDING CHANGES ====================
 
     /// Add a pending change

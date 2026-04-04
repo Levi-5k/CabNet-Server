@@ -497,7 +497,7 @@ impl TimesheetsTab {
             .rounding(egui::Rounding::same(10.0))
             .inner_margin(egui::Margin::symmetric(16.0, 12.0))
             .show(ui, |ui| {
-                ui.set_min_width(100.0);
+                ui.set_width(140.0);
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(icon).size(20.0));
                     ui.label(egui::RichText::new(value).size(22.0).strong().color(color));

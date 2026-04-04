@@ -259,6 +259,7 @@ pub struct WebClient {
     pub is_trusted: i32,
     pub last_seen_at: Option<String>,
     pub created_at: Option<String>,
+    pub user_id: Option<String>,
 }
 
 /// Pending change awaiting approval

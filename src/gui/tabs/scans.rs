@@ -36,64 +36,99 @@ impl Default for ScansTab {
 impl ScansTab {
     pub fn ui(&mut self, ui: &mut egui::Ui, data: &CachedData, state: &SharedState, runtime: &tokio::runtime::Handle) -> bool {
         let mut needs_refresh = false;
+
+        // Header
         ui.horizontal(|ui| {
-            ui.heading("Scans");
-
-            // Right-aligned controls (without export button)
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Group by dropdown
-                ui.label("Group by:");
-                ui.add_space(4.0);
-                egui::ComboBox::from_id_source("scans_time_gap")
-                    .selected_text(format!("{:.0}h", self.time_gap_hours))
-                    .width(70.0)
-                    .show_ui(ui, |ui| {
-                        for hours in [1.0, 2.0, 4.0, 8.0, 24.0] {
-                            if ui.selectable_value(&mut self.time_gap_hours, hours, format!("{:.0} hour", hours)).clicked() {
-                                self.expanded_groups.clear();
-                            }
-                        }
-                    });
-
-                ui.add_space(16.0);
-
-                // Job filter
-                ui.label("Job:");
-                ui.add_space(4.0);
-                egui::ComboBox::from_id_source("scans_job_filter")
-                    .selected_text(match self.filter_job {
-                        None => "All Jobs".to_string(),
-                        Some(id) => data.jobs.iter()
-                            .find(|j| j.id == id)
-                            .map(|j| j.name.clone())
-                            .unwrap_or_else(|| format!("Job {}", id)),
-                    })
-                    .width(120.0)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_value(&mut self.filter_job, None, "All Jobs").clicked() {
-                            self.expanded_groups.clear();
-                        }
-                        for job in &data.jobs {
-                            if ui.selectable_value(&mut self.filter_job, Some(job.id), &job.name).clicked() {
-                                self.expanded_groups.clear();
-                            }
-                        }
-                    });
-
-                ui.add_space(16.0);
-
-                // Search box
-                ui.label("🔍");
-                ui.add_space(4.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("Search barcode...")
-                        .desired_width(150.0),
-                );
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("📷").size(28.0));
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Scans").size(24.0).strong());
+                ui.label(egui::RichText::new("View all barcode scans grouped by time").size(13.0).color(egui::Color32::from_rgb(148, 163, 184)));
             });
         });
 
-        ui.separator();
+        ui.add_space(20.0);
+
+        // Stats
+        let total_scans = data.scans.len();
+        let total_jobs = data.jobs.len();
+        let today_scans = data.scans.iter().filter(|s| {
+            s.scanned_at.starts_with(&chrono::Local::now().format("%Y-%m-%d").to_string())
+        }).count();
+        ui.horizontal(|ui| {
+            Self::stat_card(ui, "📷", "Total Scans", &total_scans.to_string(), egui::Color32::from_rgb(99, 102, 241));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "📅", "Today", &today_scans.to_string(), egui::Color32::from_rgb(34, 197, 94));
+            ui.add_space(12.0);
+            Self::stat_card(ui, "📋", "Jobs", &total_jobs.to_string(), egui::Color32::from_rgb(251, 146, 60));
+        });
+
+        ui.add_space(20.0);
+
+        // Toolbar
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🔍").size(16.0));
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("Search barcode...")
+                            .desired_width(150.0),
+                    );
+
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(20.0);
+
+                    // Job filter
+                    ui.label("Job:");
+                    ui.add_space(4.0);
+                    egui::ComboBox::from_id_source("scans_job_filter")
+                        .selected_text(match self.filter_job {
+                            None => "All Jobs".to_string(),
+                            Some(id) => data.jobs.iter()
+                                .find(|j| j.id == id)
+                                .map(|j| j.name.clone())
+                                .unwrap_or_else(|| format!("Job {}", id)),
+                        })
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut self.filter_job, None, "All Jobs").clicked() {
+                                self.expanded_groups.clear();
+                            }
+                            for job in &data.jobs {
+                                if ui.selectable_value(&mut self.filter_job, Some(job.id), &job.name).clicked() {
+                                    self.expanded_groups.clear();
+                                }
+                            }
+                        });
+
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(20.0);
+
+                    // Group by dropdown
+                    ui.label("Group by:");
+                    ui.add_space(4.0);
+                    egui::ComboBox::from_id_source("scans_time_gap")
+                        .selected_text(format!("{:.0}h", self.time_gap_hours))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for hours in [1.0, 2.0, 4.0, 8.0, 24.0] {
+                                if ui.selectable_value(&mut self.time_gap_hours, hours, format!("{:.0} hour", hours)).clicked() {
+                                    self.expanded_groups.clear();
+                                }
+                            }
+                        });
+                });
+            });
+
+        ui.add_space(16.0);
 
         // Filter scans
         let filtered_scans: Vec<_> = data
@@ -108,16 +143,17 @@ impl ScansTab {
             })
             .collect();
 
-        // Export button (now that filtered_scans is available)
+        // Export button
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Export CSV").clicked() {
-                    // Generate CSV for all filtered scans
+                let export_btn = egui::Button::new(egui::RichText::new("📄 Export CSV").color(egui::Color32::WHITE).size(12.0))
+                    .fill(egui::Color32::from_rgb(34, 197, 94))
+                    .rounding(egui::Rounding::same(6.0));
+                if ui.add(export_btn).clicked() {
                     let scans: Vec<_> = filtered_scans.iter().map(|s| (*s).clone()).collect();
                     let csv_data = crate::services::email::generate_csv_report(&scans);
                     match csv_data {
                         Ok(data) => {
-                            // Open save dialog
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_title("Save All Scans CSV")
                                 .set_file_name("all_scans.csv")
@@ -125,24 +161,19 @@ impl ScansTab {
                                 .save_file()
                             {
                                 match std::fs::write(&path, data) {
-                                    Ok(_) => {
-                                        tracing::info!("Exported {} scans to {}", filtered_scans.len(), path.display());
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to save CSV: {}", e);
-                                    }
+                                    Ok(_) => tracing::info!("Exported {} scans to {}", filtered_scans.len(), path.display()),
+                                    Err(e) => tracing::error!("Failed to save CSV: {}", e),
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to generate CSV: {}", e);
-                        }
+                        Err(e) => tracing::error!("Failed to generate CSV: {}", e),
                     }
                 }
             });
         });
 
-        ui.separator();
+        ui.add_space(8.0);
+
         if filtered_scans.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label("No scans found.\n\nScans will appear here when received from the Android app.");
@@ -152,9 +183,6 @@ impl ScansTab {
 
         // Group scans by time
         let groups = self.group_scans_by_time(&filtered_scans, data);
-        
-        ui.label(format!("{} scans in {} groups", filtered_scans.len(), groups.len()));
-        ui.separator();
 
         // Show groups as card grid
         let card_width = 240.0_f32;
@@ -387,6 +415,26 @@ impl ScansTab {
                                                         ui.label(egui::RichText::new(ticket).monospace().size(14.0).color(accent));
                                                         ui.add_space(8.0);
                                                         ui.label(egui::RichText::new(format_time(&scan.scanned_at)).size(13.0).color(muted));
+
+                                                        // Map pin button if scan has GPS coords
+                                                        let has_gps = scan.latitude.map_or(false, |lat| lat != 0.0)
+                                                            || scan.longitude.map_or(false, |lon| lon != 0.0);
+                                                        if has_gps {
+                                                            if let (Some(lat), Some(lon)) = (scan.latitude, scan.longitude) {
+                                                                let pin_btn = egui::Button::new(
+                                                                    egui::RichText::new("📍").size(13.0)
+                                                                )
+                                                                .fill(egui::Color32::TRANSPARENT)
+                                                                .stroke(egui::Stroke::NONE);
+                                                                if ui.add(pin_btn).on_hover_text(format!("{:.4}, {:.4}", lat, lon)).clicked() {
+                                                                    let url = format!(
+                                                                        "https://www.openstreetmap.org/?mlat={}&mlon={}#map=18/{}/{}",
+                                                                        lat, lon, lat, lon
+                                                                    );
+                                                                    let _ = open::that(&url);
+                                                                }
+                                                            }
+                                                        }
                                                     });
                                                 }
                                             });
@@ -411,6 +459,25 @@ impl ScansTab {
         });
 
         needs_refresh
+    }
+
+    fn stat_card(ui: &mut egui::Ui, icon: &str, label: &str, value: &str, color: egui::Color32) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(140.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(icon).size(20.0));
+                    ui.label(egui::RichText::new(value).size(22.0).strong().color(color));
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+            });
     }
 
     fn group_scans_by_time<'a>(&self, scans: &[&'a crate::db::models::Scan], data: &CachedData) -> Vec<ScanGroup<'a>> {

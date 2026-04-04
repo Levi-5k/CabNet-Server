@@ -16,31 +16,33 @@ codebar-server/
 ├── Cargo.toml              # Dependencies and project config
 ├── src/
 │   ├── main.rs             # Application entry point
-│   ├── app.rs              # Main application state and GUI
-│   ├── api/                # HTTP API handlers
+│   ├── lib.rs              # Re-exports
+│   ├── config.rs           # Configuration management
+│   ├── api/                # HTTP API layer
 │   │   ├── mod.rs
-│   │   ├── scans.rs        # Scan endpoints
-│   │   ├── jobs.rs         # Job endpoints
-│   │   └── health.rs       # Health check
+│   │   ├── routes.rs       # Axum router + SharedState type
+│   │   ├── handlers.rs     # All endpoint logic + ApiResponse<T>
+│   │   └── web.rs          # HTML dashboard/search pages (inline raw strings)
 │   ├── db/                 # Database layer
+│   │   ├── mod.rs          # Pool init + inline migrations
+│   │   ├── models.rs       # DB row structs (FromRow) + API input structs
+│   │   └── repository.rs   # All CRUD operations
+│   ├── gui/                # egui immediate-mode GUI
 │   │   ├── mod.rs
-│   │   ├── models.rs       # Data structures
-│   │   ├── schema.sql      # SQLite schema
-│   │   └── repository.rs   # Database operations
-│   ├── ui/                 # GUI components
-│   │   ├── mod.rs
-│   │   ├── tabs/
-│   │   │   ├── map.rs      # Map view with scan locations
-│   │   │   ├── jobs.rs     # Job management
-│   │   │   ├── scans.rs    # Scan list and details
-│   │   │   ├── devices.rs  # Connected devices
-│   │   │   ├── settings.rs # App configuration
-│   │   │   └── email.rs    # Email settings and sending
-│   │   └── components/     # Reusable UI components
-│   ├── email/              # Email/SMTP functionality
-│   │   ├── mod.rs
-│   │   └── sender.rs
-│   └── config.rs           # Configuration management
+│   │   ├── app.rs          # CodeBarApp + CachedData + TabStates + Theme
+│   │   └── tabs/
+│   │       ├── mod.rs
+│   │       ├── jobs.rs     # Job management
+│   │       ├── scans.rs    # Scan list (with 📍 map pin buttons)
+│   │       ├── devices.rs  # Connected devices (card grid)
+│   │       ├── approvals.rs # Pending changes + web client management
+│   │       ├── email.rs    # Email settings and sending
+│   │       ├── settings.rs # App configuration
+│   │       └── team.rs     # Team member cards
+│   └── services/
+│       ├── mod.rs
+│       ├── email.rs        # SMTP via lettre
+│       └── tunnel.rs       # Cloudflare Tunnel management
 ├── data/                   # Runtime data (created automatically)
 │   └── codebar.db          # SQLite database
 └── .env                    # Environment configuration
@@ -77,12 +79,13 @@ Android Device                    CodeBar Server
 
 ## GUI Tabs
 
-1. **Map Tab** - Shows all scan locations on an OpenStreetMap-based map
-2. **Jobs Tab** - Create, edit, delete jobs; assign to devices
-3. **Scans Tab** - View all scans with filtering and search
-4. **Devices Tab** - Monitor connected devices, last seen, sync status
-5. **Settings Tab** - Server port, database path, auto-sync options
-6. **Email Tab** - SMTP configuration, auto-send rules, send history
+1. **Jobs Tab** - Create, edit, delete jobs; assign to devices
+2. **Scans Tab** - View all scans with filtering and search; 📍 pin button opens scan location in browser map
+3. **Devices Tab** - Monitor connected devices in a card grid layout, last seen, sync status
+4. **Team Tab** - Team member profiles linked to devices
+5. **Approvals Tab** - Manage pending changes from untrusted web clients; link web clients to team members
+6. **Settings Tab** - Server port, database path, auto-sync options
+7. **Email Tab** - SMTP configuration, auto-send rules, send history
 
 ## Threading Model
 
@@ -147,6 +150,12 @@ The dashboard implements a trust-based approval workflow for remote management:
    - Click "Trust Device" to allow direct changes
    - Click "Revoke Trust" to require approval again
 
+5. **Linking Web Clients to Team Members**:
+   - Each web client can be linked to a team member via `user_id` (which stores the team member's `device_id`)
+   - In desktop app → Approvals → Web Clients tab → Click "🔗 Link" → Select a team member
+   - This associates browser sessions with specific people/devices
+   - Linked member name is displayed alongside the web client
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
@@ -155,6 +164,9 @@ The dashboard implements a trust-based approval workflow for remote management:
 | `/api/web/status` | GET | Check client trust status |
 | `/api/web/clients` | GET | List all web clients |
 | `/api/web/clients/:id/trust` | PUT | Set trust status |
+| `/api/web/clients/:id/name` | PUT | Update display name |
+| `/api/web/clients/:id/link` | PUT | Link/unlink to team member |
+| `/api/web/clients/:id` | DELETE | Delete a web client |
 | `/api/web/changes` | POST | Submit a change |
 | `/api/web/changes/pending` | GET | Get pending changes |
 | `/api/web/changes/:id/approve` | POST | Approve a change |
@@ -171,6 +183,7 @@ CREATE TABLE web_clients (
     user_agent TEXT,
     ip_address TEXT,
     is_trusted INTEGER DEFAULT 0,
+    user_id TEXT,                    -- Links to team_members.device_id
     last_seen_at TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );

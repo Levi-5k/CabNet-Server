@@ -4,12 +4,14 @@ A Rust desktop application for managing barcode scans from an app or Android sca
 
 ## Features
 
-- **HTTP API Server** - Receives scans from CodeBar Android app
+- **HTTP API Server** - Receives scans from CabNet Android app
 - **Real-time Dashboard** - View scans, jobs, and devices as they update
-- **Map View** - See all scan locations on an interactive map
 - **Job Management** - Create and manage scanning jobs
 - **Device Tracking** - Monitor connected Android devices
+- **Team Management** - Team member profiles, roles, and time tracking
+- **Web Client Trust System** - Approve/reject changes from remote browsers; link web clients to team members
 - **Email Reports** - Auto-send scan reports via SMTP
+- **Cloudflare Tunnel** - Secure remote access without port forwarding
 - **CSV Export** - Export data for analysis
 
 ## Requirements
@@ -74,11 +76,6 @@ cargo test
 
 ## Tabs Overview
 
-### Map
-- Interactive map showing all scan locations
-- Click markers to see scan details
-- Filter by job, device, or date range
-
 ### Jobs
 - Create, edit, and delete jobs
 - View job progress and completion status
@@ -87,12 +84,23 @@ cargo test
 ### Scans
 - Real-time list of all scans
 - Search and filter capabilities
+- 📍 Pin button opens scan location in browser map (for GPS-enabled scans)
 - Export to CSV
 
 ### Devices
-- List of connected Android devices
-- Device status and last sync time
+- Card grid of connected Android devices
+- Device status, battery, memory, and last sync time
 - Per-device scan statistics
+
+### Team
+- Team member profiles linked to devices
+- Role management (worker, lead, admin)
+- Current status (working, break, offline)
+
+### Approvals
+- Pending changes from untrusted web clients
+- Approve or reject queued changes
+- Web client management (trust/revoke, link to team members)
 
 ### Settings
 - Server configuration (port, host)

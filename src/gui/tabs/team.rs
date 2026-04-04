@@ -204,206 +204,202 @@ impl TeamTab {
             let mut delete_request: Option<String> = None;
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let card_width = 300.0_f32;
-                let card_h_margin = 12.0_f32;
-                let card_stroke = 2.0_f32;
-                let spacing = 12.0_f32;
+                // ── Responsive grid with manual positioning ──
+                let card_w = 260.0_f32;
+                let card_h = 210.0_f32;
+                let gap = 12.0_f32;
+                let pad = 12.0_f32; // inner padding
 
-                let avail = ui.available_width();
-                let full_card = card_width + (card_h_margin + card_stroke) * 2.0;
-                let cols = ((avail + spacing) / (full_card + spacing)).floor().max(1.0) as usize;
+                let avail_w = ui.available_width();
+                let cols = ((avail_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+                let row_count = (filtered.len() + cols - 1) / cols;
+                let total_h = if row_count > 0 {
+                    row_count as f32 * (card_h + gap) - gap
+                } else {
+                    0.0
+                };
 
-                for row in filtered.chunks(cols) {
-                    ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
-                    for member in row {
-                        let border_color = match member.status.as_str() {
-                            "working" => egui::Color32::from_rgb(34, 197, 94),
-                            "break" => egui::Color32::from_rgb(251, 191, 36),
-                            _ => egui::Color32::from_rgb(60, 60, 80),
-                        };
+                // Reserve the entire grid space at once
+                let (grid_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(avail_w, total_h),
+                    egui::Sense::hover(),
+                );
 
-                            egui::Frame::none()
-                                .fill(egui::Color32::from_rgb(40, 40, 58))
-                                .rounding(egui::Rounding::same(12.0))
-                                .inner_margin(egui::Margin::symmetric(card_h_margin, 10.0))
-                                .stroke(egui::Stroke::new(card_stroke, border_color))
-                                .show(ui, |ui| {
-                                    ui.set_width(card_width);
-                                    ui.set_max_width(card_width);
+                for (i, member) in filtered.iter().enumerate() {
+                    let col = i % cols;
+                    let row = i / cols;
+                    let x = grid_rect.left() + col as f32 * (card_w + gap);
+                    let y = grid_rect.top() + row as f32 * (card_h + gap);
+                    let card_rect = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(card_w, card_h),
+                    );
 
-                                    // ── Top row: avatar + name + info ──
-                                    ui.horizontal(|ui| {
-                                        // Avatar circle
-                                        let avatar_color = member
-                                            .avatar_color
-                                            .as_deref()
-                                            .and_then(|c| {
-                                                let c = c.trim_start_matches('#');
-                                                if c.len() == 6 {
-                                                    let r = u8::from_str_radix(&c[0..2], 16).ok()?;
-                                                    let g = u8::from_str_radix(&c[2..4], 16).ok()?;
-                                                    let b = u8::from_str_radix(&c[4..6], 16).ok()?;
-                                                    Some(egui::Color32::from_rgb(r, g, b))
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or(egui::Color32::from_rgb(99, 102, 241));
+                    let border_color = match member.status.as_str() {
+                        "working" => egui::Color32::from_rgb(34, 197, 94),
+                        "break" => egui::Color32::from_rgb(251, 191, 36),
+                        _ => egui::Color32::from_rgb(60, 60, 80),
+                    };
 
-                                        let initials: String = member
-                                            .display_name
-                                            .split_whitespace()
-                                            .take(2)
-                                            .filter_map(|w| w.chars().next())
-                                            .collect::<String>()
-                                            .to_uppercase();
+                    // Card background + border
+                    ui.painter().rect_filled(
+                        card_rect,
+                        egui::Rounding::same(12.0),
+                        egui::Color32::from_rgb(40, 40, 58),
+                    );
+                    ui.painter().rect_stroke(
+                        card_rect,
+                        egui::Rounding::same(12.0),
+                        egui::Stroke::new(2.0, border_color),
+                    );
 
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(36.0, 36.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().circle_filled(rect.center(), 18.0, avatar_color);
-                                        ui.painter().text(
-                                            rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            &initials,
-                                            egui::FontId::proportional(13.0),
-                                            egui::Color32::WHITE,
-                                        );
+                    // Card content – placed inside the card rect
+                    let inner = card_rect.shrink(pad);
+                    let mut card_ui = ui.child_ui(inner, egui::Layout::top_down(egui::Align::LEFT), None);
+                    // Clip to intersection of card + scroll area so cards don't render on top of header/toolbar
+                    card_ui.set_clip_rect(card_rect.intersect(ui.clip_rect()));
+                    card_ui.set_max_width(inner.width());
 
-                                        ui.add_space(6.0);
+                    // ── TOP: Avatar row ──
+                    card_ui.horizontal(|ui| {
+                        // Avatar circle
+                        let avatar_color = member
+                            .avatar_color
+                            .as_deref()
+                            .and_then(|c| {
+                                let c = c.trim_start_matches('#');
+                                if c.len() == 6 {
+                                    let r = u8::from_str_radix(&c[0..2], 16).ok()?;
+                                    let g = u8::from_str_radix(&c[2..4], 16).ok()?;
+                                    let b = u8::from_str_radix(&c[4..6], 16).ok()?;
+                                    Some(egui::Color32::from_rgb(r, g, b))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(egui::Color32::from_rgb(99, 102, 241));
 
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(&member.display_name)
-                                                        .size(14.0)
-                                                        .strong()
-                                                        .color(egui::Color32::WHITE),
-                                                );
-                                                if let Some(ref job) = member.current_job {
-                                                    ui.label(
-                                                        egui::RichText::new(format!("📋 {}", job))
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(148, 163, 184)),
-                                                    );
-                                                }
-                                            });
+                        let initials: String = member
+                            .display_name
+                            .split_whitespace()
+                            .take(2)
+                            .filter_map(|w| w.chars().next())
+                            .collect::<String>()
+                            .to_uppercase();
 
-                                            // Status badge
-                                            let (status_icon, status_text, status_color) =
-                                                match member.status.as_str() {
-                                                    "working" => (
-                                                        "🟢",
-                                                        "Working",
-                                                        egui::Color32::from_rgb(34, 197, 94),
-                                                    ),
-                                                    "break" => (
-                                                        "☕",
-                                                        "On Break",
-                                                        egui::Color32::from_rgb(251, 191, 36),
-                                                    ),
-                                                    _ => (
-                                                        "⚫",
-                                                        "Offline",
-                                                        egui::Color32::from_rgb(107, 114, 128),
-                                                    ),
-                                                };
-                                            ui.label(
-                                                egui::RichText::new(format!("{} {}", status_icon, status_text))
-                                                    .size(11.0)
-                                                    .color(status_color),
-                                            );
-                                        });
-                                    });
+                        let (avatar_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(36.0, 36.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().circle_filled(avatar_rect.center(), 18.0, avatar_color);
+                        ui.painter().text(
+                            avatar_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            &initials,
+                            egui::FontId::proportional(13.0),
+                            egui::Color32::WHITE,
+                        );
 
-                                    ui.add_space(4.0);
-                                    ui.separator();
-                                    ui.add_space(4.0);
+                        // Status badge (right-aligned)
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (status_icon, status_text, status_color) =
+                                match member.status.as_str() {
+                                    "working" => ("🟢", "Working", egui::Color32::from_rgb(34, 197, 94)),
+                                    "break" => ("☕", "On Break", egui::Color32::from_rgb(251, 191, 36)),
+                                    _ => ("⚫", "Offline", egui::Color32::from_rgb(107, 114, 128)),
+                                };
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", status_icon, status_text))
+                                    .size(11.0)
+                                    .color(status_color),
+                            );
+                        });
+                    });
 
-                                    // ── Role row ──
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Role:")
-                                                .size(11.0)
-                                                .color(egui::Color32::from_rgb(148, 163, 184)),
-                                        );
-                                        let combo_id = format!("role_{}", member.device_id);
-                                        let mut current_role = member.role.clone();
-                                        let prev_role = current_role.clone();
-                                        egui::ComboBox::from_id_source(&combo_id)
-                                            .selected_text(&current_role)
-                                            .width(80.0)
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(
-                                                    &mut current_role,
-                                                    "worker".to_string(),
-                                                    "Worker",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut current_role,
-                                                    "lead".to_string(),
-                                                    "Lead",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut current_role,
-                                                    "manager".to_string(),
-                                                    "Manager",
-                                                );
-                                            });
-                                        if current_role != prev_role {
-                                            role_change = Some((
-                                                member.device_id.clone(),
-                                                current_role,
-                                            ));
-                                        }
-                                    });
+                    card_ui.add_space(4.0);
 
-                                    ui.add_space(2.0);
+                    // ── Name ──
+                    card_ui.label(
+                        egui::RichText::new(&member.display_name)
+                            .size(15.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
 
-                                    // ── Admin + Delete row ──
-                                    ui.horizontal(|ui| {
-                                        // Admin toggle
-                                        let (admin_label, admin_color) = if member.is_admin {
-                                            ("👑 Admin", egui::Color32::from_rgb(251, 191, 36))
-                                        } else {
-                                            ("User", egui::Color32::from_rgb(107, 114, 128))
-                                        };
-                                        let admin_btn = egui::Button::new(
-                                            egui::RichText::new(admin_label)
-                                                .size(11.0)
-                                                .color(admin_color),
-                                        )
-                                        .fill(egui::Color32::from_rgb(30, 30, 46))
-                                        .rounding(egui::Rounding::same(4.0));
-                                        if ui
-                                            .add(admin_btn)
-                                            .on_hover_text("Click to toggle admin")
-                                            .clicked()
-                                        {
-                                            admin_toggle =
-                                                Some((member.device_id.clone(), !member.is_admin));
-                                        }
+                    // ── Job (if present) ──
+                    if let Some(ref job) = member.current_job {
+                        card_ui.label(
+                            egui::RichText::new(format!("📋 {}", job))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                        );
+                    }
 
-                                        // Delete button
-                                        let del_btn = egui::Button::new(
-                                            egui::RichText::new("🗑")
-                                                .size(13.0)
-                                                .color(egui::Color32::from_rgb(239, 68, 68)),
-                                        )
-                                        .fill(egui::Color32::TRANSPARENT);
-                                        if ui
-                                            .add(del_btn)
-                                            .on_hover_text("Delete member")
-                                            .clicked()
-                                        {
-                                            delete_request =
-                                                Some(member.device_id.clone());
-                                        }
-                                    });
-                                });
+                    card_ui.add_space(4.0);
+                    card_ui.separator();
+                    card_ui.add_space(4.0);
+
+                    // ── Role selector ──
+                    card_ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Role:")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                        );
+                        let combo_id = format!("role_{}", member.device_id);
+                        let mut current_role = member.role.clone();
+                        let prev_role = current_role.clone();
+                        egui::ComboBox::from_id_source(&combo_id)
+                            .selected_text(&current_role)
+                            .width(90.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut current_role, "worker".to_string(), "Worker");
+                                ui.selectable_value(&mut current_role, "lead".to_string(), "Lead");
+                                ui.selectable_value(&mut current_role, "manager".to_string(), "Manager");
+                            });
+                        if current_role != prev_role {
+                            role_change = Some((member.device_id.clone(), current_role));
                         }
+                    });
+
+                    card_ui.add_space(4.0);
+
+                    // ── Admin toggle + Delete ──
+                    card_ui.horizontal(|ui| {
+                        let (admin_label, admin_color) = if member.is_admin {
+                            ("👑 Admin", egui::Color32::from_rgb(251, 191, 36))
+                        } else {
+                            ("   User  ", egui::Color32::from_rgb(107, 114, 128))
+                        };
+                        let admin_btn = egui::Button::new(
+                            egui::RichText::new(admin_label).size(11.0).color(admin_color),
+                        )
+                        .fill(egui::Color32::from_rgb(30, 30, 46))
+                        .rounding(egui::Rounding::same(4.0));
+                        if ui
+                            .add(admin_btn)
+                            .on_hover_text("Click to toggle admin")
+                            .clicked()
+                        {
+                            admin_toggle = Some((member.device_id.clone(), !member.is_admin));
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let del_btn = egui::Button::new(
+                                egui::RichText::new("🗑")
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(239, 68, 68)),
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .rounding(egui::Rounding::same(4.0));
+                            if ui
+                                .add(del_btn)
+                                .on_hover_text("Delete member")
+                                .clicked()
+                            {
+                                delete_request = Some(member.device_id.clone());
+                            }
+                        });
                     });
                 }
             });
@@ -568,7 +564,7 @@ impl TeamTab {
             .rounding(egui::Rounding::same(10.0))
             .inner_margin(egui::Margin::symmetric(16.0, 12.0))
             .show(ui, |ui| {
-                ui.set_min_width(100.0);
+                ui.set_width(140.0);
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(icon).size(20.0));
                     ui.label(egui::RichText::new(value).size(22.0).strong().color(color));

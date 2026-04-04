@@ -94,6 +94,101 @@ CREATE TABLE email_config (
 );
 ```
 
+### web_clients
+
+Browser sessions that access the web dashboard. Each web client can optionally be linked to a team member via `user_id` (which references `team_members.device_id`). This allows associating browser sessions with specific team members/devices.
+
+```sql
+CREATE TABLE web_clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT UNIQUE NOT NULL,    -- UUID assigned on registration
+    client_name TEXT,                  -- User-friendly display name
+    user_agent TEXT,                   -- Browser user agent string
+    ip_address TEXT,                   -- Client IP address
+    is_trusted INTEGER DEFAULT 0,     -- 0 = untrusted, 1 = trusted
+    user_id TEXT,                      -- Links to team_members.device_id
+    last_seen_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_web_clients_client_id ON web_clients(client_id);
+```
+
+### pending_changes
+
+Queued changes from untrusted web clients awaiting approval.
+
+```sql
+CREATE TABLE pending_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL,           -- References web_clients.client_id
+    change_type TEXT NOT NULL,         -- 'create', 'update', 'delete'
+    entity_type TEXT NOT NULL,         -- 'job', 'device', 'scan'
+    entity_id TEXT,
+    change_data TEXT NOT NULL,         -- JSON payload
+    status TEXT DEFAULT 'pending',     -- 'pending', 'approved', 'rejected'
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    
+    FOREIGN KEY (client_id) REFERENCES web_clients(client_id)
+);
+
+CREATE INDEX idx_pending_changes_status ON pending_changes(status);
+```
+
+### team_members
+
+Team member profiles linked to Android devices.
+
+```sql
+CREATE TABLE team_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT UNIQUE NOT NULL,    -- Android device identifier (also used as user_id)
+    display_name TEXT NOT NULL,
+    phone_number TEXT,
+    role TEXT DEFAULT 'worker',        -- worker, lead, admin
+    is_admin INTEGER DEFAULT 0,
+    avatar_color TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_team_members_device_id ON team_members(device_id);
+```
+
+### time_entries
+
+Time clock entries from mobile devices.
+
+```sql
+CREATE TABLE time_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT UNIQUE NOT NULL,
+    device_id TEXT NOT NULL,
+    customer_name TEXT,
+    job_name TEXT,
+    job_id TEXT,
+    clock_in TEXT NOT NULL,
+    clock_out TEXT,
+    note TEXT,
+    is_break INTEGER DEFAULT 0,
+    is_paid INTEGER DEFAULT 1,
+    synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Relationships
+
+```
+web_clients.user_id  →  team_members.device_id   (optional link)
+team_members.device_id  →  devices.device_id      (same physical device)
+scans.device_id  →  devices.device_id
+scans.job_id  →  jobs.id
+pending_changes.client_id  →  web_clients.client_id
+```
+
 ### email_history
 
 Tracks sent emails.
@@ -213,13 +308,14 @@ GROUP BY j.id;
 
 ## Migrations
 
-SQLx handles migrations automatically. Place migration files in `migrations/` folder:
+Migrations are **inline** in `src/db/mod.rs::run_migrations()`. Tables use `CREATE TABLE IF NOT EXISTS` for initial creation, and new columns use idempotent `ALTER TABLE ... ADD COLUMN` with error suppression (`let _ = ...`) so they can run repeatedly.
 
-```
-migrations/
-├── 001_initial.sql
-├── 002_add_email_history.sql
-└── ...
+Example migration pattern:
+```rust
+// Migration: Add user_id column to web_clients for linking to team members
+let _ = sqlx::query("ALTER TABLE web_clients ADD COLUMN user_id TEXT")
+    .execute(pool)
+    .await;
 ```
 
 Each migration file should be idempotent and include both the schema changes.

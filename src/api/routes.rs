@@ -69,6 +69,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/web/clients", get(handlers::get_web_clients))
         .route("/api/web/clients/:client_id/trust", put(handlers::set_web_client_trust))
         .route("/api/web/clients/:client_id/name", put(handlers::update_web_client_name))
+        .route("/api/web/clients/:client_id/link", put(handlers::link_web_client))
         .route("/api/web/clients/:client_id", delete(handlers::delete_web_client))
         // Pending changes (for approval workflow)
         .route("/api/web/changes", post(handlers::submit_change))

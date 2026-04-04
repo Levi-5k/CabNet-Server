@@ -384,6 +384,196 @@ Get all registered devices.
 
 ---
 
+## Web Clients (Trust System)
+
+### POST /api/web/register
+
+Register a new web client (browser session). Returns a unique `client_id` stored in the browser's localStorage.
+
+**Request:**
+```json
+{
+  "client_name": "Office Laptop"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "client_id": "550e8400-e29b-41d4-a716-446655440000",
+    "is_trusted": false,
+    "client_name": "Office Laptop"
+  }
+}
+```
+
+### GET /api/web/status
+
+Check a web client's trust status.
+
+**Query Parameters:**
+- `client_id` (required) - The web client UUID
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "client_id": "550e8400-...",
+    "is_trusted": true,
+    "client_name": "Office Laptop"
+  }
+}
+```
+
+### GET /api/web/clients
+
+List all registered web clients (used by the desktop app).
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "clients": [
+      {
+        "id": 1,
+        "client_id": "550e8400-...",
+        "client_name": "Office Laptop",
+        "user_agent": "Mozilla/5.0 ...",
+        "ip_address": "192.168.1.50",
+        "is_trusted": 1,
+        "user_id": "abc123",
+        "last_seen_at": "2024-01-30T12:00:00Z",
+        "created_at": "2024-01-28T10:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### PUT /api/web/clients/:client_id/trust
+
+Set a web client's trust status.
+
+**Request:**
+```json
+{
+  "is_trusted": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Client trusted"
+}
+```
+
+### PUT /api/web/clients/:client_id/name
+
+Update a web client's display name.
+
+**Request:**
+```json
+{
+  "name": "Warehouse Terminal"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Name updated"
+}
+```
+
+### PUT /api/web/clients/:client_id/link
+
+Link or unlink a web client to/from a team member. The `user_id` is the team member's `device_id`. Send `null` to unlink.
+
+**Request (link):**
+```json
+{
+  "user_id": "abc123"
+}
+```
+
+**Request (unlink):**
+```json
+{
+  "user_id": null
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Client linked to user"
+}
+```
+
+### DELETE /api/web/clients/:client_id
+
+Delete a web client.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Client deleted"
+}
+```
+
+---
+
+## Pending Changes (Approval Workflow)
+
+### POST /api/web/changes
+
+Submit a change from a web client. If the client is trusted, the change is applied immediately. Otherwise, it is queued for approval.
+
+**Request:**
+```json
+{
+  "client_id": "550e8400-...",
+  "change_type": "create",
+  "entity_type": "job",
+  "entity_id": null,
+  "change_data": { "name": "New Job", "expected_count": 100 }
+}
+```
+
+**Response (queued):**
+```json
+{
+  "success": true,
+  "data": {
+    "applied": false,
+    "pending_id": 42
+  }
+}
+```
+
+### GET /api/web/changes/pending
+
+Get all pending changes awaiting approval.
+
+### POST /api/web/changes/:id/approve
+
+Approve a pending change (applies it).
+
+### POST /api/web/changes/:id/reject
+
+Reject a pending change (discards it).
+
+---
+
 ## Error Responses
 
 All endpoints return errors in this format:
@@ -459,3 +649,17 @@ All endpoints return errors in this format:
 | last_seen | int64 | Last activity timestamp |
 | total_scans | int | Total scans from device |
 | is_online | bool | Currently connected |
+
+### WebClient
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | int | Auto-increment row ID |
+| client_id | string (UUID) | Unique client identifier |
+| client_name | string? | User-friendly display name |
+| user_agent | string? | Browser user agent |
+| ip_address | string? | Client IP address |
+| is_trusted | int | 0 = untrusted, 1 = trusted |
+| user_id | string? | Linked team member's device_id |
+| last_seen_at | string | ISO 8601 last activity |
+| created_at | string | ISO 8601 registration time |

@@ -1352,6 +1352,37 @@ pub async fn update_web_client_name(
     Ok(Json(ApiResponse::success_with_message((), "Name updated")))
 }
 
+#[derive(Deserialize)]
+pub struct LinkWebClientRequest {
+    pub user_id: Option<String>,
+}
+
+/// PUT /api/web/clients/:client_id/link - Link or unlink a web client to/from a team member
+pub async fn link_web_client(
+    State(state): State<SharedState>,
+    Path(client_id): Path<String>,
+    Json(request): Json<LinkWebClientRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    
+    match request.user_id {
+        Some(user_id) => {
+            state.repo.link_web_client_to_user(&client_id, &user_id).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string())))
+            })?;
+            tracing::info!("Web client {} linked to user {}", client_id, user_id);
+            Ok(Json(ApiResponse::success_with_message((), "Client linked to user")))
+        }
+        None => {
+            state.repo.unlink_web_client_user(&client_id).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string())))
+            })?;
+            tracing::info!("Web client {} unlinked from user", client_id);
+            Ok(Json(ApiResponse::success_with_message((), "Client unlinked")))
+        }
+    }
+}
+
 // ==================== PENDING CHANGES HANDLERS ====================
 
 #[derive(Deserialize)]

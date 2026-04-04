@@ -15,7 +15,7 @@ main.rs → spawns Tokio runtime
 
 - **`src/api/`** – Axum HTTP layer: `routes.rs` (router + `SharedState` type), `handlers.rs` (all endpoint logic + `ApiResponse<T>` pattern), `web.rs` (HTML dashboard/search pages served inline as raw strings).
 - **`src/db/`** – SQLite via SQLx: `mod.rs` (pool init + inline migrations in `run_migrations()`), `models.rs` (DB row structs `FromRow` + API input structs), `repository.rs` (all CRUD, ~1800 lines).
-- **`src/gui/`** – egui immediate-mode GUI: `app.rs` (`CodeBarApp` with `CachedData`, `TabStates`, `Theme`), `tabs/` (one file per tab: map, jobs, scans, devices, approvals, email, settings).
+- **`src/gui/`** – egui immediate-mode GUI: `app.rs` (`CodeBarApp` with `CachedData`, `TabStates`, `Theme`), `tabs/` (one file per tab: jobs, scans, devices, team, approvals, email, settings).
 - **`src/services/`** – `email.rs` (SMTP via lettre), `tunnel.rs` (Cloudflare Tunnel management via `cloudflared` CLI subprocess).
 - **`src/config.rs`** – `Config::from_env()` loads from `.env`/env vars; `get_data_dir()` resolves to `Documents/CabNet` on Windows.
 

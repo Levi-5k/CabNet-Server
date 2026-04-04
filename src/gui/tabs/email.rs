@@ -55,15 +55,22 @@ impl EmailTab {
 
         // Header
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Email Reports").size(24.0).strong());
-            
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("📧").size(28.0));
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Email Reports").size(24.0).strong());
+                ui.label(egui::RichText::new("Configure SMTP and automated report sending").size(13.0).color(egui::Color32::from_rgb(148, 163, 184)));
+            });
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Send Now button
                 let send_btn = egui::Button::new(
-                    egui::RichText::new("📤 Send Report Now").color(egui::Color32::WHITE)
+                    egui::RichText::new("📤 Send Report Now").color(egui::Color32::WHITE).size(14.0)
                 )
                 .fill(egui::Color32::from_rgb(34, 197, 94))
-                .rounding(egui::Rounding::same(6.0));
+                .rounding(egui::Rounding::same(8.0))
+                .min_size(egui::vec2(160.0, 36.0));
                 
                 if ui.add(send_btn).clicked() {
                     self.test_status = Some("⚠️ Send report not yet implemented".to_string());
@@ -73,10 +80,11 @@ impl EmailTab {
                 
                 // Save button
                 let save_btn = egui::Button::new(
-                    egui::RichText::new("💾 Save Settings").color(egui::Color32::WHITE)
+                    egui::RichText::new("💾 Save Settings").color(egui::Color32::WHITE).size(14.0)
                 )
                 .fill(egui::Color32::from_rgb(99, 102, 241))
-                .rounding(egui::Rounding::same(6.0));
+                .rounding(egui::Rounding::same(8.0))
+                .min_size(egui::vec2(140.0, 36.0));
                 
                 if ui.add(save_btn).clicked() {
                     self.save_settings(state, runtime);
@@ -85,18 +93,24 @@ impl EmailTab {
             });
         });
 
-        ui.add_space(16.0);
+        ui.add_space(20.0);
 
-        // Section tabs
-        ui.horizontal(|ui| {
-            Self::section_tab(ui, &mut self.active_section, EmailSection::Smtp, "📧 SMTP Server");
-            ui.add_space(8.0);
-            Self::section_tab(ui, &mut self.active_section, EmailSection::Template, "📝 Email Template");
-            ui.add_space(8.0);
-            Self::section_tab(ui, &mut self.active_section, EmailSection::AutoSend, "⏰ Auto-Send");
-            ui.add_space(8.0);
-            Self::section_tab(ui, &mut self.active_section, EmailSection::History, "📜 History");
-        });
+        // Section tabs in toolbar
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(40, 40, 58))
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    Self::section_tab(ui, &mut self.active_section, EmailSection::Smtp, "📧 SMTP Server");
+                    ui.add_space(8.0);
+                    Self::section_tab(ui, &mut self.active_section, EmailSection::Template, "📝 Email Template");
+                    ui.add_space(8.0);
+                    Self::section_tab(ui, &mut self.active_section, EmailSection::AutoSend, "⏰ Auto-Send");
+                    ui.add_space(8.0);
+                    Self::section_tab(ui, &mut self.active_section, EmailSection::History, "📜 History");
+                });
+            });
 
         ui.add_space(16.0);
 

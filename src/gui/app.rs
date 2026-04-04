@@ -3,12 +3,11 @@ use crate::db::models::*;
 use crate::services::SharedTunnelManager;
 use eframe::egui;
 
-use super::tabs::{ApprovalsTab, DevicesTab, EmailTab, JobsTab, MapTab, ScansTab, SettingsTab, TeamTab, TimesheetsTab};
+use super::tabs::{ApprovalsTab, DevicesTab, EmailTab, JobsTab, ScansTab, SettingsTab, TeamTab, TimesheetsTab};
 
 /// Available tabs in the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Map,
     Jobs,
     Scans,
     Devices,
@@ -52,7 +51,6 @@ pub struct CodeBarApp {
 
 /// State for individual tabs
 pub struct TabStates {
-    pub map: MapTab,
     pub jobs: JobsTab,
     pub scans: ScansTab,
     pub devices: DevicesTab,
@@ -66,7 +64,6 @@ pub struct TabStates {
 impl Default for TabStates {
     fn default() -> Self {
         Self {
-            map: MapTab::default(),
             jobs: JobsTab::default(),
             scans: ScansTab::default(),
             devices: DevicesTab::default(),
@@ -288,8 +285,6 @@ impl eframe::App for CodeBarApp {
                     ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Timesheets, "📋", "Timesheets");
                     ui.add_space(4.0);
-                    Self::tab_button(ui, &mut self.current_tab, Tab::Map, "🗺", "Map");
-                    ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Email, "✉", "Email");
                     ui.add_space(4.0);
                     Self::tab_button(ui, &mut self.current_tab, Tab::Approvals, "⚡", "Approvals");
@@ -364,7 +359,6 @@ impl eframe::App for CodeBarApp {
                 .inner_margin(egui::Margin::same(20.0)))
             .show(ctx, |ui| {
                 match self.current_tab {
-                    Tab::Map => self.tabs.map.ui(ui, &self.cached_data),
                     Tab::Jobs => {
                         if self.tabs.jobs.ui(ui, &self.cached_data, &self.state, &self.runtime) {
                             self.needs_refresh = true;

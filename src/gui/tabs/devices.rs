@@ -225,14 +225,15 @@ impl DevicesTab {
             .rounding(egui::Rounding::same(12.0))
             .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
-                ui.set_min_width(140.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icon).size(28.0));
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(value).size(24.0).color(color).strong());
-                        ui.label(egui::RichText::new(label).size(11.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                    });
+                ui.set_width(140.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(icon).size(20.0));
+                    ui.label(egui::RichText::new(value).size(22.0).strong().color(color));
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
                 });
             });
     }
@@ -257,131 +258,148 @@ impl DevicesTab {
     }
 
     fn show_cards_view(&mut self, ui: &mut egui::Ui, devices: &[&crate::db::models::DeviceWithStats]) {
-        let card_width = 320.0;
-        let spacing = 16.0;
-        let cards_per_row = ((ui.available_width() + spacing) / (card_width + spacing)).floor().max(1.0) as usize;
+        let card_w = 280.0_f32;
+        let card_h = 280.0_f32;
+        let gap = 14.0_f32;
+        let pad = 16.0_f32;
 
-        egui::Grid::new("device_cards").num_columns(cards_per_row).spacing([spacing, spacing]).show(ui, |ui| {
-            for (i, device) in devices.iter().enumerate() {
-                self.device_card(ui, device, card_width);
-                if (i + 1) % cards_per_row == 0 { ui.end_row(); }
-            }
-        });
-    }
+        let avail_w = ui.available_width();
+        let cols = ((avail_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+        let row_count = (devices.len() + cols - 1) / cols;
+        let total_h = if row_count > 0 {
+            row_count as f32 * (card_h + gap) - gap
+        } else {
+            0.0
+        };
 
-    fn device_card(&mut self, ui: &mut egui::Ui, device: &crate::db::models::DeviceWithStats, width: f32) {
-        let is_online = device.is_online;
-        let border_color = if is_online { egui::Color32::from_rgb(34, 197, 94) } else { egui::Color32::from_rgb(75, 75, 95) };
+        let (grid_rect, _) = ui.allocate_exact_size(
+            egui::vec2(avail_w, total_h),
+            egui::Sense::hover(),
+        );
 
-        egui::Frame::none()
-            .fill(egui::Color32::from_rgb(40, 40, 58))
-            .stroke(egui::Stroke::new(2.0, border_color))
-            .rounding(egui::Rounding::same(14.0))
-            .inner_margin(egui::Margin::same(20.0))
-            .show(ui, |ui| {
-                ui.set_min_width(width - 40.0);
-                ui.set_max_width(width - 40.0);
-                
-                ui.horizontal(|ui| {
-                    let icon = if device.device.model.as_ref().map_or(false, |m| m.to_lowercase().contains("zebra")) { "📟" } else { "📱" };
-                    ui.label(egui::RichText::new(icon).size(36.0));
-                    ui.add_space(12.0);
-                    
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(device.device.device_name.as_deref().unwrap_or("Unknown Device")).size(16.0).strong());
-                        let (status_color, status_text) = if is_online { (egui::Color32::from_rgb(34, 197, 94), "● Online") } else { (egui::Color32::from_rgb(107, 114, 128), "○ Offline") };
-                        ui.label(egui::RichText::new(status_text).size(12.0).color(status_color));
-                    });
-                    
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_rgb(99, 102, 241))
-                            .rounding(egui::Rounding::same(12.0))
-                            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(format!("{} scans", device.total_scans)).size(11.0).color(egui::Color32::WHITE));
-                            });
-                    });
+        let accent = egui::Color32::from_rgb(99, 102, 241);
+        let muted = egui::Color32::from_rgb(148, 163, 184);
+        let card_bg = egui::Color32::from_rgb(40, 40, 58);
+        let detail_bg = egui::Color32::from_rgb(30, 30, 45);
+
+        for (i, device) in devices.iter().enumerate() {
+            let col = i % cols;
+            let row = i / cols;
+            let x = grid_rect.left() + col as f32 * (card_w + gap);
+            let y = grid_rect.top() + row as f32 * (card_h + gap);
+            let card_rect = egui::Rect::from_min_size(
+                egui::pos2(x, y),
+                egui::vec2(card_w, card_h),
+            );
+
+            let is_online = device.is_online;
+            let border_color = if is_online {
+                egui::Color32::from_rgb(34, 197, 94)
+            } else {
+                egui::Color32::from_rgb(60, 60, 80)
+            };
+
+            // Card background + border via painter
+            ui.painter().rect_filled(card_rect, egui::Rounding::same(14.0), card_bg);
+            ui.painter().rect_stroke(card_rect, egui::Rounding::same(14.0), egui::Stroke::new(2.0, border_color));
+
+            // Card content
+            let inner = card_rect.shrink(pad);
+            let mut card_ui = ui.child_ui(inner, egui::Layout::top_down(egui::Align::LEFT), None);
+            card_ui.set_clip_rect(card_rect.intersect(ui.clip_rect()));
+            card_ui.set_max_width(inner.width());
+
+            // Row 1: Icon + Name/Status + Scan badge
+            card_ui.horizontal(|ui| {
+                let icon = if device.device.model.as_ref().map_or(false, |m| m.to_lowercase().contains("zebra")) { "📟" } else { "📱" };
+                ui.label(egui::RichText::new(icon).size(32.0));
+                ui.add_space(8.0);
+
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(
+                        device.device.device_name.as_deref().unwrap_or("Unknown Device")
+                    ).size(15.0).strong());
+                    let (status_color, status_text) = if is_online {
+                        (egui::Color32::from_rgb(34, 197, 94), "● Online")
+                    } else {
+                        (egui::Color32::from_rgb(107, 114, 128), "○ Offline")
+                    };
+                    ui.label(egui::RichText::new(status_text).size(11.0).color(status_color));
                 });
-                
-                ui.add_space(16.0);
-                
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(30, 30, 45))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::same(12.0))
-                    .show(ui, |ui| {
-                        egui::Grid::new(format!("details_{}", device.device.device_id)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                            ui.label(egui::RichText::new("ID").size(11.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                            ui.label(egui::RichText::new(&device.device.device_id).size(11.0)); ui.end_row();
-                            ui.label(egui::RichText::new("Model").size(11.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                            ui.label(egui::RichText::new(device.device.model.as_deref().unwrap_or("-")).size(11.0)); ui.end_row();
-                            ui.label(egui::RichText::new("OS").size(11.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                            ui.label(egui::RichText::new(device.device.os_version.as_deref().unwrap_or("-")).size(11.0)); ui.end_row();
-                            ui.label(egui::RichText::new("App").size(11.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                            ui.label(egui::RichText::new(device.device.app_version.as_deref().unwrap_or("-")).size(11.0)); ui.end_row();
-                        });
-                    });
-                
-                ui.add_space(12.0);
-                
-                // Enhanced status information
-                if device.device.battery_level.is_some() || device.device.network_type.is_some() || device.device.connection_count.is_some() {
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(30, 30, 45))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::same(12.0))
+                        .fill(accent)
+                        .rounding(egui::Rounding::same(10.0))
+                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("📊 Status").size(12.0).strong().color(egui::Color32::from_rgb(99, 102, 241)));
-                            ui.add_space(8.0);
-                            
-                            egui::Grid::new(format!("status_{}", device.device.device_id)).num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                                if let Some(battery) = device.device.battery_level {
-                                    ui.label(egui::RichText::new("🔋 Battery").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    let battery_text = if let Some(charging) = device.device.is_charging {
-                                        if charging { format!("{}% ⚡", battery) } else { format!("{}%", battery) }
-                                    } else {
-                                        format!("{}%", battery)
-                                    };
-                                    ui.label(egui::RichText::new(battery_text).size(10.0)); ui.end_row();
-                                }
-                                
-                                if let Some(memory) = device.device.available_memory_mb {
-                                    ui.label(egui::RichText::new("💾 Memory").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    ui.label(egui::RichText::new(format!("{} MB", memory)).size(10.0)); ui.end_row();
-                                }
-                                
-                                if let Some(network) = &device.device.network_type {
-                                    ui.label(egui::RichText::new("📡 Network").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    ui.label(egui::RichText::new(network).size(10.0)); ui.end_row();
-                                }
-                                
-                                if let Some(quality) = &device.device.connection_quality {
-                                    ui.label(egui::RichText::new("📶 Quality").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    ui.label(egui::RichText::new(quality).size(10.0)); ui.end_row();
-                                }
-                                
-                                if let Some(connections) = device.device.connection_count {
-                                    ui.label(egui::RichText::new("🔄 Sessions").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    ui.label(egui::RichText::new(connections.to_string()).size(10.0)); ui.end_row();
-                                }
-                                
-                                if let Some(uptime) = device.device.total_uptime_seconds {
-                                    ui.label(egui::RichText::new("⏱️ Uptime").size(10.0).color(egui::Color32::from_rgb(148, 163, 184)));
-                                    ui.label(egui::RichText::new(format_duration(uptime)).size(10.0)); ui.end_row();
-                                }
-                            });
+                            ui.label(egui::RichText::new(format!("{} scans", device.total_scans)).size(10.0).color(egui::Color32::WHITE));
                         });
-                    
-                    ui.add_space(12.0);
-                }
-                
-                let last_seen = device.device.last_seen_at.as_ref().map(|s| format_relative_time(s)).unwrap_or_else(|| "Never".to_string());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🕐").size(12.0));
-                    ui.label(egui::RichText::new(format!("Last seen: {}", last_seen)).size(12.0).color(egui::Color32::from_rgb(148, 163, 184)));
                 });
             });
+
+            card_ui.add_space(10.0);
+
+            // Row 2: Device details in dark frame
+            egui::Frame::none()
+                .fill(detail_bg)
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(10.0))
+                .show(&mut card_ui, |ui| {
+                    egui::Grid::new(format!("card_details_{}", device.device.device_id))
+                        .num_columns(2)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("ID").size(10.0).color(muted));
+                            ui.label(egui::RichText::new(&device.device.device_id).size(10.0));
+                            ui.end_row();
+                            ui.label(egui::RichText::new("Model").size(10.0).color(muted));
+                            ui.label(egui::RichText::new(device.device.model.as_deref().unwrap_or("-")).size(10.0));
+                            ui.end_row();
+                            ui.label(egui::RichText::new("OS").size(10.0).color(muted));
+                            ui.label(egui::RichText::new(device.device.os_version.as_deref().unwrap_or("-")).size(10.0));
+                            ui.end_row();
+                            ui.label(egui::RichText::new("App").size(10.0).color(muted));
+                            ui.label(egui::RichText::new(device.device.app_version.as_deref().unwrap_or("-")).size(10.0));
+                            ui.end_row();
+                        });
+                });
+
+            card_ui.add_space(8.0);
+
+            // Row 3: Status info (sessions, uptime) if available
+            let has_status = device.device.connection_count.is_some() || device.device.total_uptime_seconds.is_some();
+            if has_status {
+                egui::Frame::none()
+                    .fill(detail_bg)
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(&mut card_ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("📊 Status").size(10.0).strong().color(accent));
+                            if let Some(connections) = device.device.connection_count {
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(format!("🔄 Sessions  {}", connections)).size(10.0).color(muted));
+                            }
+                            if let Some(uptime) = device.device.total_uptime_seconds {
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(format!("⏱️ Uptime  {}", format_duration(uptime))).size(10.0).color(muted));
+                            }
+                        });
+                    });
+
+                card_ui.add_space(8.0);
+            }
+
+            // Row 4: Last seen (bottom)
+            let last_seen = device.device.last_seen_at.as_ref()
+                .map(|s| format_relative_time(s))
+                .unwrap_or_else(|| "Never".to_string());
+            card_ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🕐").size(11.0));
+                ui.label(egui::RichText::new(format!("Last seen: {}", last_seen)).size(11.0).color(muted));
+            });
+        }
     }
 
     fn show_table_view(&mut self, ui: &mut egui::Ui, devices: &[&crate::db::models::DeviceWithStats]) {
