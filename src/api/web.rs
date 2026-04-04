@@ -2920,6 +2920,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         let clientId = localStorage.getItem('cabnet_client_id');
         let clientName = localStorage.getItem('cabnet_client_name') || '';
         let isTrusted = false;
+        let linkedUserId = null;
         let jobs = [];
         let devices = [];
         let scans = [];
@@ -3006,6 +3007,10 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     }}
                     updateTrustBadge();
                     updateClientDisplay();
+                    if (data.user_id) {{
+                        linkedUserId = data.user_id;
+                        loadUserBackground(linkedUserId);
+                    }}
                 }} else {{
                     // Client not found, re-register
                     localStorage.removeItem('cabnet_client_id');
@@ -3023,6 +3028,23 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             }}
         }}
         
+        // Load and apply user background image
+        async function loadUserBackground(userId) {{
+            try {{
+                const response = await fetch(`/api/user/background/${{encodeURIComponent(userId)}}`);
+                if (response.ok) {{
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    document.body.style.backgroundImage = `url(${{url}})`;
+                    document.body.style.backgroundSize = 'cover';
+                    document.body.style.backgroundPosition = 'center';
+                    document.body.style.backgroundAttachment = 'fixed';
+                }}
+            }} catch (e) {{
+                console.log('No user background available');
+            }}
+        }}
+
         // Update trust badge
         function updateTrustBadge() {{
             const badge = document.getElementById('trust-badge');

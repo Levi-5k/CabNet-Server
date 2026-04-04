@@ -612,5 +612,20 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // User backgrounds table (background images uploaded from iOS app)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_backgrounds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT UNIQUE NOT NULL,
+            image_data BLOB NOT NULL,
+            content_type TEXT DEFAULT 'image/jpeg',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

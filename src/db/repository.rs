@@ -2655,6 +2655,37 @@ impl Repository {
             .await?;
         Ok(result.rows_affected())
     }
+    // ==================== USER BACKGROUNDS ====================
+
+    pub async fn save_user_background(&self, device_id: &str, image_data: &[u8], content_type: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO user_backgrounds (device_id, image_data, content_type, created_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(device_id) DO UPDATE SET image_data = excluded.image_data, content_type = excluded.content_type, created_at = datetime('now')"
+        )
+        .bind(device_id)
+        .bind(image_data)
+        .bind(content_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_user_background(&self, device_id: &str) -> anyhow::Result<Option<(Vec<u8>, String)>> {
+        let row: Option<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT image_data, content_type FROM user_backgrounds WHERE device_id = ?"
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_user_background(&self, device_id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM user_backgrounds WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 /// Round a DateTime to the nearest N minutes

@@ -1205,6 +1205,7 @@ pub struct WebClientResponse {
     pub client_id: String,
     pub is_trusted: bool,
     pub client_name: Option<String>,
+    pub user_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1251,6 +1252,7 @@ pub async fn register_web_client(
         client_id: client.client_id,
         is_trusted: client.is_trusted != 0,
         client_name: client.client_name,
+        user_id: client.user_id,
     })))
 }
 
@@ -1275,6 +1277,7 @@ pub async fn get_web_client_status(
             client_id: c.client_id,
             is_trusted: c.is_trusted != 0,
             client_name: c.client_name,
+            user_id: c.user_id,
         }))),
         None => Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Client not found")))),
     }
@@ -4152,4 +4155,83 @@ pub fn parse_lading_tickets_pub(text: &str, job_id: &str, file_uuid: &str, file_
 
 pub fn extract_bol_address_pub(text: &str) -> Option<String> {
     extract_bol_address(text)
+}
+
+// ==================== USER BACKGROUNDS ====================
+
+/// POST /api/user/background - Upload background image (multipart: device_id + image)
+pub async fn upload_user_background(
+    State(state): State<SharedState>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut device_id: Option<String> = None;
+    let mut image_data: Option<Vec<u8>> = None;
+    let mut content_type = "image/jpeg".to_string();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "device_id" => {
+                if let Ok(text) = field.text().await {
+                    device_id = Some(text);
+                }
+            }
+            "image" => {
+                if let Some(ct) = field.content_type() {
+                    content_type = ct.to_string();
+                }
+                if let Ok(bytes) = field.bytes().await {
+                    image_data = Some(bytes.to_vec());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let device_id = device_id.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing device_id")))
+    })?;
+    let image_data = image_data.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("Missing image data")))
+    })?;
+
+    let state = state.read().await;
+    state.repo.save_user_background(&device_id, &image_data, &content_type).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::success_with_message((), "Background uploaded".to_string())))
+}
+
+/// GET /api/user/background/:device_id - Serve the raw background image
+pub async fn get_user_background(
+    State(state): State<SharedState>,
+    Path(device_id): Path<String>,
+) -> Result<axum::response::Response, StatusCode> {
+    let state = state.read().await;
+    let (data, ct) = state.repo.get_user_background(&device_id).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", ct)
+        .header("Cache-Control", "public, max-age=3600")
+        .body(axum::body::Body::from(data))
+        .unwrap())
+}
+
+/// DELETE /api/user/background - Remove background image
+pub async fn delete_user_background(
+    State(state): State<SharedState>,
+    Json(body): Json<DeleteBackgroundRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    state.repo.delete_user_background(&body.device_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    Ok(Json(ApiResponse::success_with_message((), "Background removed".to_string())))
+}
+
+#[derive(Deserialize)]
+pub struct DeleteBackgroundRequest {
+    pub device_id: String,
 }
