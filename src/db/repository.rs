@@ -2659,7 +2659,7 @@ impl Repository {
 
     pub async fn save_user_background(&self, device_id: &str, image_data: &[u8], content_type: &str) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO user_backgrounds (device_id, image_data, content_type, created_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(device_id) DO UPDATE SET image_data = excluded.image_data, content_type = excluded.content_type, created_at = datetime('now')"
+            "INSERT INTO user_backgrounds (device_id, image_data, content_type, background_type, created_at) VALUES (?, ?, ?, 'image', datetime('now')) ON CONFLICT(device_id) DO UPDATE SET image_data = excluded.image_data, content_type = excluded.content_type, background_type = 'image', created_at = datetime('now')"
         )
         .bind(device_id)
         .bind(image_data)
@@ -2671,12 +2671,33 @@ impl Repository {
 
     pub async fn get_user_background(&self, device_id: &str) -> anyhow::Result<Option<(Vec<u8>, String)>> {
         let row: Option<(Vec<u8>, String)> = sqlx::query_as(
-            "SELECT image_data, content_type FROM user_backgrounds WHERE device_id = ?"
+            "SELECT image_data, content_type FROM user_backgrounds WHERE device_id = ? AND background_type = 'image' AND image_data IS NOT NULL"
         )
         .bind(device_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    pub async fn get_user_background_type(&self, device_id: &str) -> anyhow::Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT background_type FROM user_backgrounds WHERE device_id = ?"
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    pub async fn set_user_background_type(&self, device_id: &str, background_type: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO user_backgrounds (device_id, background_type, created_at) VALUES (?, ?, datetime('now')) ON CONFLICT(device_id) DO UPDATE SET background_type = excluded.background_type"
+        )
+        .bind(device_id)
+        .bind(background_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn delete_user_background(&self, device_id: &str) -> anyhow::Result<bool> {

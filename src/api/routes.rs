@@ -124,7 +124,9 @@ pub fn create_router(state: SharedState) -> Router {
         // User Backgrounds
         .route("/api/user/background", post(handlers::upload_user_background))
         .route("/api/user/background", delete(handlers::delete_user_background))
+        .route("/api/user/background/type", put(handlers::set_user_background_type))
         .route("/api/user/background/:device_id", get(handlers::get_user_background))
+        .route("/api/user/background/:device_id/type", get(handlers::get_user_background_type))
         .with_state(state)
         .layer(RequestDecompressionLayer::new()) // Decompress gzip requests from Android
         .layer(CompressionLayer::new()) // Compress responses with gzip/deflate

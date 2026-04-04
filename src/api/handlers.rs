@@ -4235,3 +4235,46 @@ pub async fn delete_user_background(
 pub struct DeleteBackgroundRequest {
     pub device_id: String,
 }
+
+/// PUT /api/user/background/type - Set background type for a user
+pub async fn set_user_background_type(
+    State(state): State<SharedState>,
+    Json(body): Json<SetBackgroundTypeRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let valid_types = ["image", "shader", "none"];
+    if !valid_types.contains(&body.background_type.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid background_type. Must be: image, shader, or none"))));
+    }
+    let state = state.read().await;
+    if body.background_type == "none" {
+        state.repo.delete_user_background(&body.device_id).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    } else {
+        state.repo.set_user_background_type(&body.device_id, &body.background_type).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    }
+    Ok(Json(ApiResponse::success_with_message((), format!("Background type set to {}", body.background_type))))
+}
+
+/// GET /api/user/background/:device_id/type - Get background type for a user
+pub async fn get_user_background_type(
+    State(state): State<SharedState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<ApiResponse<BackgroundTypeResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let bg_type = state.repo.get_user_background_type(&device_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?
+        .unwrap_or_else(|| "none".to_string());
+    Ok(Json(ApiResponse::success(BackgroundTypeResponse { background_type: bg_type })))
+}
+
+#[derive(Deserialize)]
+pub struct SetBackgroundTypeRequest {
+    pub device_id: String,
+    pub background_type: String,
+}
+
+#[derive(Serialize)]
+pub struct BackgroundTypeResponse {
+    pub background_type: String,
+}

@@ -3028,21 +3028,103 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             }}
         }}
         
-        // Load and apply user background image
+        // Load and apply user background (image or shader animation)
         async function loadUserBackground(userId) {{
             try {{
-                const response = await fetch(`/api/user/background/${{encodeURIComponent(userId)}}`);
-                if (response.ok) {{
-                    const blob = await response.blob();
-                    const url = URL.createObjectURL(blob);
-                    document.body.style.backgroundImage = `url(${{url}})`;
-                    document.body.style.backgroundSize = 'cover';
-                    document.body.style.backgroundPosition = 'center';
-                    document.body.style.backgroundAttachment = 'fixed';
+                const typeResp = await fetch(`/api/user/background/${{encodeURIComponent(userId)}}/type`);
+                if (!typeResp.ok) return;
+                const typeData = await typeResp.json();
+                const bgType = typeData.background_type || 'none';
+
+                if (bgType === 'image') {{
+                    const response = await fetch(`/api/user/background/${{encodeURIComponent(userId)}}`);
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        const url = URL.createObjectURL(blob);
+                        document.body.style.backgroundImage = `url(${{url}})`;
+                        document.body.style.backgroundSize = 'cover';
+                        document.body.style.backgroundPosition = 'center';
+                        document.body.style.backgroundAttachment = 'fixed';
+                    }}
+                }} else if (bgType === 'shader') {{
+                    startShaderAnimation();
                 }}
             }} catch (e) {{
                 console.log('No user background available');
             }}
+        }}
+
+        // Three.js shader background animation
+        function startShaderAnimation() {{
+            const script = document.createElement('script');
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+            script.onload = () => {{
+                const canvas = document.createElement('div');
+                canvas.id = 'shader-bg';
+                canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:-1;pointer-events:none;';
+                document.body.prepend(canvas);
+                document.body.style.background = 'transparent';
+                document.body.style.backgroundImage = 'none';
+
+                const camera = new THREE.Camera();
+                camera.position.z = 1;
+                const scene = new THREE.Scene();
+                const geometry = new THREE.PlaneGeometry(2, 2);
+
+                const uniforms = {{
+                    time: {{ type: 'f', value: 1.0 }},
+                    resolution: {{ type: 'v2', value: new THREE.Vector2() }},
+                }};
+
+                const material = new THREE.ShaderMaterial({{
+                    uniforms: uniforms,
+                    vertexShader: `void main() {{ gl_Position = vec4(position, 1.0); }}`,
+                    fragmentShader: `
+                        #define TWO_PI 6.2831853072
+                        #define PI 3.14159265359
+                        precision highp float;
+                        uniform vec2 resolution;
+                        uniform float time;
+                        void main(void) {{
+                            vec2 uv = (gl_FragCoord.xy * 2.0 - resolution.xy) / min(resolution.x, resolution.y);
+                            float t = time * 0.05;
+                            float lineWidth = 0.002;
+                            vec3 color = vec3(0.0);
+                            for(int j = 0; j < 3; j++) {{
+                                for(int i = 0; i < 5; i++) {{
+                                    color[j] += lineWidth * float(i*i) / abs(fract(t - 0.01*float(j) + float(i)*0.01) * 5.0 - length(uv) + mod(uv.x+uv.y, 0.2));
+                                }}
+                            }}
+                            gl_FragColor = vec4(color[0], color[1], color[2], 1.0);
+                        }}
+                    `,
+                }});
+
+                const mesh = new THREE.Mesh(geometry, material);
+                scene.add(mesh);
+
+                const renderer = new THREE.WebGLRenderer({{ antialias: true }});
+                renderer.setPixelRatio(window.devicePixelRatio);
+                canvas.appendChild(renderer.domElement);
+
+                function onResize() {{
+                    const w = canvas.clientWidth;
+                    const h = canvas.clientHeight;
+                    renderer.setSize(w, h);
+                    uniforms.resolution.value.x = renderer.domElement.width;
+                    uniforms.resolution.value.y = renderer.domElement.height;
+                }}
+                onResize();
+                window.addEventListener('resize', onResize);
+
+                function animate() {{
+                    requestAnimationFrame(animate);
+                    uniforms.time.value += 0.05;
+                    renderer.render(scene, camera);
+                }}
+                animate();
+            }};
+            document.head.appendChild(script);
         }}
 
         // Update trust badge

@@ -618,14 +618,23 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS user_backgrounds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT UNIQUE NOT NULL,
-            image_data BLOB NOT NULL,
+            image_data BLOB,
             content_type TEXT DEFAULT 'image/jpeg',
+            background_type TEXT DEFAULT 'image',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
     .execute(pool)
     .await?;
+
+    // Migration: Add background_type column
+    let _ = sqlx::query("ALTER TABLE user_backgrounds ADD COLUMN background_type TEXT DEFAULT 'image'")
+        .execute(pool)
+        .await;
+
+    // Migration: Allow NULL image_data for shader-only entries
+    // SQLite doesn't support ALTER COLUMN, but new inserts can have NULL image_data
 
     Ok(())
 }
