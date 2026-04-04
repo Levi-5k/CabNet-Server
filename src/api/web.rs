@@ -2779,6 +2779,8 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             localStorage.setItem('cabnet_settings', JSON.stringify(settings));
         }}
 
+        let shaderActive = false;
+
         function applySettings(settings) {{
             const r = document.documentElement.style;
             // Theme mode
@@ -2825,7 +2827,9 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             // Animations
             document.body.classList.toggle('no-animations', !settings.animations);
             // Gradient bg
-            document.body.style.backgroundImage = settings.gradient ? theme.bgGradient : 'none';
+            if (!shaderActive) {{
+                document.body.style.backgroundImage = settings.gradient ? theme.bgGradient : 'none';
+            }}
         }}
 
         function syncSettingsUI(settings) {{
@@ -3056,74 +3060,85 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
 
         // Three.js shader background animation
         function startShaderAnimation() {{
+            if (document.getElementById('shader-bg')) return;
             const script = document.createElement('script');
             script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
             script.onload = () => {{
-                const canvas = document.createElement('div');
-                canvas.id = 'shader-bg';
-                canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:-1;pointer-events:none;';
-                document.body.prepend(canvas);
-                document.body.style.background = 'transparent';
-                document.body.style.backgroundImage = 'none';
+                try {{
+                    const container = document.createElement('div');
+                    container.id = 'shader-bg';
+                    container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:0;background:#000;overflow:hidden;';
+                    document.body.prepend(container);
+                    shaderActive = true;
 
-                const camera = new THREE.Camera();
-                camera.position.z = 1;
-                const scene = new THREE.Scene();
-                const geometry = new THREE.PlaneGeometry(2, 2);
+                    // Make body and layout transparent so shader shows through
+                    document.body.style.background = 'transparent';
+                    document.body.style.backgroundImage = 'none';
+                    document.querySelector('.layout').style.position = 'relative';
+                    document.querySelector('.layout').style.zIndex = '1';
 
-                const uniforms = {{
-                    time: {{ type: 'f', value: 1.0 }},
-                    resolution: {{ type: 'v2', value: new THREE.Vector2() }},
-                }};
+                    const camera = new THREE.Camera();
+                    camera.position.z = 1;
+                    const scene = new THREE.Scene();
+                    const geometry = new THREE.PlaneGeometry(2, 2);
 
-                const material = new THREE.ShaderMaterial({{
-                    uniforms: uniforms,
-                    vertexShader: `void main() {{ gl_Position = vec4(position, 1.0); }}`,
-                    fragmentShader: `
-                        #define TWO_PI 6.2831853072
-                        #define PI 3.14159265359
-                        precision highp float;
-                        uniform vec2 resolution;
-                        uniform float time;
-                        void main(void) {{
-                            vec2 uv = (gl_FragCoord.xy * 2.0 - resolution.xy) / min(resolution.x, resolution.y);
-                            float t = time * 0.05;
-                            float lineWidth = 0.002;
-                            vec3 color = vec3(0.0);
-                            for(int j = 0; j < 3; j++) {{
-                                for(int i = 0; i < 5; i++) {{
-                                    color[j] += lineWidth * float(i*i) / abs(fract(t - 0.01*float(j) + float(i)*0.01) * 5.0 - length(uv) + mod(uv.x+uv.y, 0.2));
+                    const uniforms = {{
+                        time: {{ type: 'f', value: 1.0 }},
+                        resolution: {{ type: 'v2', value: new THREE.Vector2() }},
+                    }};
+
+                    const material = new THREE.ShaderMaterial({{
+                        uniforms: uniforms,
+                        vertexShader: `void main() {{ gl_Position = vec4(position, 1.0); }}`,
+                        fragmentShader: `
+                            #define TWO_PI 6.2831853072
+                            #define PI 3.14159265359
+                            precision highp float;
+                            uniform vec2 resolution;
+                            uniform float time;
+                            void main(void) {{
+                                vec2 uv = (gl_FragCoord.xy * 2.0 - resolution.xy) / min(resolution.x, resolution.y);
+                                float t = time * 0.05;
+                                float lineWidth = 0.002;
+                                vec3 color = vec3(0.0);
+                                for(int j = 0; j < 3; j++) {{
+                                    for(int i = 0; i < 5; i++) {{
+                                        color[j] += lineWidth * float(i*i) / abs(fract(t - 0.01*float(j) + float(i)*0.01) * 5.0 - length(uv) + mod(uv.x+uv.y, 0.2));
+                                    }}
                                 }}
+                                gl_FragColor = vec4(color[0], color[1], color[2], 1.0);
                             }}
-                            gl_FragColor = vec4(color[0], color[1], color[2], 1.0);
-                        }}
-                    `,
-                }});
+                        `,
+                    }});
 
-                const mesh = new THREE.Mesh(geometry, material);
-                scene.add(mesh);
+                    const mesh = new THREE.Mesh(geometry, material);
+                    scene.add(mesh);
 
-                const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-                renderer.setPixelRatio(window.devicePixelRatio);
-                canvas.appendChild(renderer.domElement);
+                    const renderer = new THREE.WebGLRenderer({{ antialias: true }});
+                    renderer.setPixelRatio(window.devicePixelRatio);
+                    container.appendChild(renderer.domElement);
 
-                function onResize() {{
-                    const w = canvas.clientWidth;
-                    const h = canvas.clientHeight;
-                    renderer.setSize(w, h);
-                    uniforms.resolution.value.x = renderer.domElement.width;
-                    uniforms.resolution.value.y = renderer.domElement.height;
+                    function onResize() {{
+                        const w = container.clientWidth;
+                        const h = container.clientHeight;
+                        renderer.setSize(w, h);
+                        uniforms.resolution.value.x = renderer.domElement.width;
+                        uniforms.resolution.value.y = renderer.domElement.height;
+                    }}
+                    onResize();
+                    window.addEventListener('resize', onResize);
+
+                    function animate() {{
+                        requestAnimationFrame(animate);
+                        uniforms.time.value += 0.05;
+                        renderer.render(scene, camera);
+                    }}
+                    animate();
+                }} catch (e) {{
+                    console.error('Shader animation error:', e);
                 }}
-                onResize();
-                window.addEventListener('resize', onResize);
-
-                function animate() {{
-                    requestAnimationFrame(animate);
-                    uniforms.time.value += 0.05;
-                    renderer.render(scene, camera);
-                }}
-                animate();
             }};
+            script.onerror = () => {{ console.error('Failed to load Three.js'); }};
             document.head.appendChild(script);
         }}
 
