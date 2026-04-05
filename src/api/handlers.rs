@@ -1121,21 +1121,19 @@ pub async fn device_connect(
         )
     })?;
 
-    // Update existing team member's display name if they are already registered
+    // Create or update team member record for this device
     if let Some(ref user_name) = request.user_name {
         if !user_name.trim().is_empty() {
-            if let Ok(Some(_)) = state.repo.get_team_member_by_device(&device_id).await {
-                let team_input = crate::db::models::TeamMemberInput {
-                    device_id: request.device_id.clone(),
-                    display_name: user_name.trim().to_string(),
-                    phone_number: request.phone_number.clone(),
-                    role: None,
-                    is_admin: None,
-                    avatar_color: None,
-                };
-                if let Err(e) = state.repo.upsert_team_member(&team_input).await {
-                    tracing::warn!("Failed to update team member: {}", e);
-                }
+            let team_input = crate::db::models::TeamMemberInput {
+                device_id: request.device_id.clone(),
+                display_name: user_name.trim().to_string(),
+                phone_number: request.phone_number.clone(),
+                role: None,
+                is_admin: None,
+                avatar_color: None,
+            };
+            if let Err(e) = state.repo.upsert_team_member(&team_input).await {
+                tracing::warn!("Failed to upsert team member: {}", e);
             }
         }
     }
