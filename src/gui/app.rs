@@ -198,7 +198,7 @@ impl CodeBarApp {
 
         let scan_locations = runtime.block_on(async {
             let state = state.read().await;
-            state.repo.get_scan_locations().await.unwrap_or_default()
+            state.repo.get_scan_locations(5000).await.unwrap_or_default()
         });
 
         let scan_count = runtime.block_on(async {

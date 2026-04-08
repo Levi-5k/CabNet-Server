@@ -150,6 +150,11 @@ pub struct GetScanLocationsResponse {
 }
 
 #[derive(Deserialize)]
+pub struct GetScanLocationsQuery {
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
 pub struct GetJobsQuery {
     pub device_id: Option<String>,
     pub since: Option<i64>,
@@ -557,17 +562,14 @@ pub async fn download_scans(
 
     let total = state.repo.get_scan_count().await.unwrap_or(0);
 
-    // Build a cache of job_id -> job_uuid
-    let mut job_uuid_cache: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    for scan in &scans {
-        if let Some(jid) = scan.job_id {
-            if !job_uuid_cache.contains_key(&jid) {
-                if let Ok(Some(job)) = state.repo.get_job(jid).await {
-                    job_uuid_cache.insert(jid, job.uuid);
-                }
-            }
-        }
-    }
+    // Build a cache of job_id -> job_uuid in a single batch query
+    let unique_job_ids: Vec<i64> = scans
+        .iter()
+        .filter_map(|s| s.job_id)
+        .collect::<std::collections::HashSet<i64>>()
+        .into_iter()
+        .collect();
+    let job_uuid_cache = state.repo.get_job_uuid_map(&unique_job_ids).await.unwrap_or_default();
 
     let payloads: Vec<ScanDownloadPayload> = scans
         .into_iter()
@@ -600,12 +602,14 @@ pub async fn download_scans(
 /// GET /api/scans/locations - Get scans with GPS coordinates for map display
 pub async fn get_scan_locations(
     State(state): State<SharedState>,
+    Query(query): Query<GetScanLocationsQuery>,
 ) -> Result<Json<ApiResponse<GetScanLocationsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    let limit = query.limit.unwrap_or(5000);
 
     let locations = state
         .repo
-        .get_scan_locations()
+        .get_scan_locations(limit)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get scan locations: {}", e);
@@ -855,6 +859,20 @@ pub async fn register_device(
     headers: HeaderMap,
     Json(mut request): Json<DeviceInput>,
 ) -> Result<Json<ApiResponse<DeviceRegisterResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    // Validate input field lengths
+    if request.device_id.is_empty() || request.device_id.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("device_id must be 1-255 characters")),
+        ));
+    }
+    if request.device_name.as_ref().map_or(false, |n| n.len() > 255) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("device_name must not exceed 255 characters")),
+        ));
+    }
+
     let state = state.read().await;
     let device_id = request.device_id.clone();
     let ip_address = addr.ip().to_string();
@@ -1788,6 +1806,19 @@ pub async fn block_device(
     State(state): State<SharedState>,
     Json(request): Json<BlockDeviceRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if request.minutes <= 0 || request.minutes > 43200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("minutes must be between 1 and 43200 (30 days)")),
+        ));
+    }
+    if request.device_id.is_empty() || request.device_id.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Invalid device_id")),
+        ));
+    }
+
     let mut state = state.write().await;
 
     state.repo.block_device(&request.device_id, request.minutes).await
@@ -2796,54 +2827,6 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
     // Handles both inline /Font << ... >> and indirect /Resources N 0 R (resolves the ref).
     let mut stream_font_map: HashMap<u32, HashMap<String, u32>> = HashMap::new();
 
-    // Helper: parse a /Font << /name obj 0 R ... >> dict from a text region
-    fn parse_font_dict_from_region(region: &str) -> Option<HashMap<String, u32>> {
-        let f_pos = region.find("/Font")?;
-        let after_f = &region[f_pos + "/Font".len()..];
-        let open = after_f.find("<<")?;
-        if open >= 30 { return None; }
-        let inner = &after_f[open + 2..];
-        let close = inner.find(">>")?;
-        let font_dict = &inner[..close];
-        let tokens: Vec<&str> = font_dict.split_whitespace().collect();
-        let mut fonts: HashMap<String, u32> = HashMap::new();
-        let mut t = 0;
-        while t + 3 < tokens.len() {
-            if tokens[t].starts_with('/') && tokens[t + 2] == "0" && tokens[t + 3] == "R" {
-                let name = tokens[t][1..].to_string();
-                if let Ok(obj) = tokens[t + 1].parse::<u32>() {
-                    fonts.insert(name, obj);
-                }
-                t += 4;
-            } else {
-                t += 1;
-            }
-        }
-        if fonts.is_empty() { None } else { Some(fonts) }
-    }
-
-    // Helper: find object N definition in raw PDF and return its text region
-    fn find_obj_text(raw: &[u8], obj_num: u32) -> Option<String> {
-        let needle = format!("{} 0 obj", obj_num);
-        let needle_bytes = needle.as_bytes();
-        let mut pos = 0;
-        while pos < raw.len() {
-            match find_bytes(&raw[pos..], needle_bytes) {
-                Some(found) => {
-                    let abs = pos + found;
-                    // Ensure it's not part of a larger number (e.g., "26 0 obj" for "6 0 obj")
-                    if abs == 0 || !raw[abs - 1].is_ascii_digit() {
-                        let end = std::cmp::min(abs + 1000, raw.len());
-                        return Some(String::from_utf8_lossy(&raw[abs..end]).to_string());
-                    }
-                    pos = abs + needle_bytes.len();
-                }
-                None => break,
-            }
-        }
-        None
-    }
-
     {
         let page_needle = b"/Type /Page";
         let mut search_pos: usize = 0;
@@ -3374,6 +3357,53 @@ fn extract_pdf_text(data: &[u8], file_name: &str) -> Option<String> {
             result.len(), all_texts.len(), file_name, sample);
         Some(result)
     }
+}
+
+/// Parse a /Font << /name obj 0 R ... >> dict from a text region.
+fn parse_font_dict_from_region(region: &str) -> Option<std::collections::HashMap<String, u32>> {
+    let f_pos = region.find("/Font")?;
+    let after_f = &region[f_pos + "/Font".len()..];
+    let open = after_f.find("<<")?;
+    if open >= 30 { return None; }
+    let inner = &after_f[open + 2..];
+    let close = inner.find(">>")?;
+    let font_dict = &inner[..close];
+    let tokens: Vec<&str> = font_dict.split_whitespace().collect();
+    let mut fonts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut t = 0;
+    while t + 3 < tokens.len() {
+        if tokens[t].starts_with('/') && tokens[t + 2] == "0" && tokens[t + 3] == "R" {
+            let name = tokens[t][1..].to_string();
+            if let Ok(obj) = tokens[t + 1].parse::<u32>() {
+                fonts.insert(name, obj);
+            }
+            t += 4;
+        } else {
+            t += 1;
+        }
+    }
+    if fonts.is_empty() { None } else { Some(fonts) }
+}
+
+/// Find object N definition in raw PDF and return its text region (up to 1000 bytes).
+fn find_obj_text(raw: &[u8], obj_num: u32) -> Option<String> {
+    let needle = format!("{} 0 obj", obj_num);
+    let needle_bytes = needle.as_bytes();
+    let mut pos = 0;
+    while pos < raw.len() {
+        match find_bytes(&raw[pos..], needle_bytes) {
+            Some(found) => {
+                let abs = pos + found;
+                if abs == 0 || !raw[abs - 1].is_ascii_digit() {
+                    let end = std::cmp::min(abs + 1000, raw.len());
+                    return Some(String::from_utf8_lossy(&raw[abs..end]).to_string());
+                }
+                pos = abs + needle_bytes.len();
+            }
+            None => break,
+        }
+    }
+    None
 }
 
 /// Extract a parenthesized string from PDF content, handling escapes.

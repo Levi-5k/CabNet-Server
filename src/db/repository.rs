@@ -204,16 +204,18 @@ impl Repository {
     }
 
     /// Get scans with GPS coordinates for map display
-    pub async fn get_scan_locations(&self) -> anyhow::Result<Vec<ScanLocation>> {
+    pub async fn get_scan_locations(&self, limit: i64) -> anyhow::Result<Vec<ScanLocation>> {
+        let effective_limit = if limit > 0 && limit <= 50000 { limit } else { 5000 };
         // First try scans with explicit lat/lon
         let scans = sqlx::query_as::<_, (i64, String, String, Option<f64>, Option<f64>, Option<String>, String, String)>(
             r#"
             SELECT s.id, s.uuid, s.barcode, s.latitude, s.longitude, s.location, s.scanned_at, s.device_id
             FROM scans s
             ORDER BY s.scanned_at DESC
-            LIMIT 1000
+            LIMIT ?
             "#,
         )
+        .bind(effective_limit)
         .fetch_all(&self.pool)
         .await?;
 
@@ -308,6 +310,15 @@ impl Repository {
     /// Get total scan count
     pub async fn get_scan_count(&self) -> anyhow::Result<i64> {
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    /// Get scan count since a given ISO timestamp
+    pub async fn get_scan_count_since(&self, since: &str) -> anyhow::Result<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans WHERE scanned_at >= ?")
+            .bind(since)
             .fetch_one(&self.pool)
             .await?;
         Ok(count.0)
@@ -437,25 +448,39 @@ impl Repository {
 
     /// Get jobs with scan counts
     pub async fn get_jobs_with_counts(&self) -> anyhow::Result<Vec<JobWithCount>> {
-        // Get jobs first
         let jobs = self.get_jobs().await?;
-        let mut result = Vec::new();
-
-        for job in jobs {
-            let scan_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans WHERE job_id = ?")
-                .bind(job.id)
-                .fetch_one(&self.pool)
-                .await?;
-            let file_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM job_files WHERE job_id = ?")
-                .bind(&job.uuid)
-                .fetch_one(&self.pool)
-                .await?;
-            result.push(JobWithCount {
-                job,
-                scan_count: scan_count.0 as i32,
-                file_count: file_count.0 as i32,
-            });
+        if jobs.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // Batch load scan counts for all jobs in one query
+        let scan_counts: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT job_id, COUNT(*) FROM scans WHERE job_id IS NOT NULL GROUP BY job_id"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let scan_map: std::collections::HashMap<i64, i64> = scan_counts.into_iter().collect();
+
+        // Batch load file counts for all jobs in one query
+        let file_counts: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT job_id, COUNT(*) FROM job_files GROUP BY job_id"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let file_map: std::collections::HashMap<String, i64> = file_counts.into_iter().collect();
+
+        let result = jobs
+            .into_iter()
+            .map(|job| {
+                let sc = scan_map.get(&job.id).copied().unwrap_or(0) as i32;
+                let fc = file_map.get(&job.uuid).copied().unwrap_or(0) as i32;
+                JobWithCount {
+                    job,
+                    scan_count: sc,
+                    file_count: fc,
+                }
+            })
+            .collect();
 
         Ok(result)
     }
@@ -466,6 +491,21 @@ impl Repository {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?)
+    }
+
+    /// Batch lookup job_id -> uuid for a set of job IDs (avoids N+1 queries)
+    pub async fn get_job_uuid_map(&self, job_ids: &[i64]) -> anyhow::Result<std::collections::HashMap<i64, String>> {
+        if job_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<&str> = job_ids.iter().map(|_| "?").collect();
+        let sql = format!("SELECT id, uuid FROM jobs WHERE id IN ({})", placeholders.join(","));
+        let mut query = sqlx::query_as::<_, (i64, String)>(&sql);
+        for &id in job_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Set the address on a job, identified by numeric id or uuid string.

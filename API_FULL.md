@@ -344,9 +344,9 @@ Register a new device. Subject to rate limiting and optional registration code r
 ```json
 {
   "device_id": "unique-device-id",
-  "device_name": "iPhone 17 Pro Max",
+  "device_name": "iPhone 17 Pro",
   "model": "iPhone",
-  "os_version": "iOS 26.4",
+  "os_version": "iOS 26",
   "app_version": "1.0.0",
   "registration_code": "ABC123"
 }
@@ -375,7 +375,7 @@ Approve a registered device (admin action).
 }
 ```
 
-### `POST /api/devices/authenticate`
+### `POST /api/devices/auth`
 
 Authenticate a device with its token.
 
@@ -1042,7 +1042,7 @@ Get current security configuration.
 
 Update security settings. All fields optional.
 
-### `POST /api/security/codes`
+### `POST /api/security/generate-code`
 
 Generate a new device registration code.
 

@@ -484,6 +484,10 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_entry_time ON location_pings(time_entry_id, timestamp)")
+        .execute(pool)
+        .await?;
+
     // Team members table
     sqlx::query(
         r#"

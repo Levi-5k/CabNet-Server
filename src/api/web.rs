@@ -546,76 +546,106 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
     
     // Get stats
     let device_count = state.repo.get_devices().await.map(|d| d.len()).unwrap_or(0);
-    let scan_count = state.repo.get_scan_count().await.unwrap_or(0) as usize;
-    let job_count = state.repo.get_jobs().await.map(|j| j.len()).unwrap_or(0);
-    let uptime_secs = state.start_time.elapsed().as_secs();
-    let recent_scans = state.repo.get_scans(None, None, None, 5).await.unwrap_or_default();
     let jobs_with_counts = state.repo.get_jobs_with_counts().await.unwrap_or_default();
     let active_workers = state.repo.get_active_time_entries().await.unwrap_or_default();
     let report_count = state.repo.get_report_count().await.unwrap_or(0);
     let active_worker_count = active_workers.len();
-    let uptime = format_uptime(uptime_secs);
+    let uptime = format_uptime(state.start_time.elapsed().as_secs());
     let version = env!("CARGO_PKG_VERSION");
     
-    // Generate recent scans HTML
-    let recent_scans_html = if recent_scans.is_empty() {
-        "<p style='color: var(--text-muted); font-style: italic;'>No recent scans</p>".to_string()
+    // Job stats
+    let active_jobs: Vec<_> = jobs_with_counts.iter().filter(|j| j.job.status != "COMPLETED" && j.job.status != "CANCELLED").collect();
+    let active_job_count = active_jobs.len();
+    let completed_job_count = jobs_with_counts.iter().filter(|j| j.job.status == "COMPLETED").count();
+
+    // Build active jobs HTML with room progress
+    let active_jobs_html = if active_jobs.is_empty() {
+        r##"<p style="color: var(--text-muted); font-style: italic; padding: 1rem;">No active jobs.</p>"##.to_string()
     } else {
-        let mut scan_htmls = Vec::new();
-        for scan in &recent_scans {
-            let time_ago = format_time_ago(&scan.scanned_at);
-            let barcode_short = if scan.barcode.len() > 20 {
-                format!("{}...", &scan.barcode[..17])
-            } else {
-                scan.barcode.clone()
+        let mut htmls = Vec::new();
+        for job in active_jobs.iter().take(10) {
+            let summary = state.repo.get_room_progress_summary(&job.job.uuid).await.ok();
+            let (total_rooms, completed_rooms, total_cabs) = match &summary {
+                Some(s) => (s.total_rooms, s.completed_rooms, s.total_cabinets),
+                None => (0, 0, 0),
             };
-            // Resolve job name: first try job_id, then barcode_job_ref → reference_number
-            let job_name = if let Some(job_id) = scan.job_id {
-                state.repo.get_job(job_id).await.ok().flatten().map(|j| j.name)
-            } else {
-                None
+            let room_pct = if total_rooms > 0 { (completed_rooms as f32 / total_rooms as f32 * 100.0) as i32 } else { 0 };
+            let scan_pct = if job.job.expected_count > 0 { (job.scan_count as f32 / job.job.expected_count as f32 * 100.0).min(100.0) as i32 } else { 0 };
+
+            let status_badge = match job.job.status.as_str() {
+                "IN_PROGRESS" => r#"<span style="background: rgba(99,102,241,0.15); color: var(--accent); padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600;">In Progress</span>"#,
+                "NOT_STARTED" => r#"<span style="background: rgba(148,163,184,0.15); color: var(--text-muted); padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600;">Not Started</span>"#,
+                _ => r#"<span style="background: rgba(148,163,184,0.15); color: var(--text-muted); padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600;">Active</span>"#,
             };
-            let job_name = job_name.or_else(|| {
-                scan.barcode_job_ref.as_deref()
-                    .filter(|r| !r.is_empty())
-                    .and_then(|ref_num| {
-                        jobs_with_counts.iter().find(|j| j.job.reference_number.as_deref() == Some(ref_num)).map(|j| j.job.name.clone())
-                    })
-            });
-            let job_label = job_name.unwrap_or_else(|| "Unassigned".to_string());
-            scan_htmls.push(format!(r##"<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
-                <div>
-                    <div style="font-weight: 500;">{}</div>
-                    <div style="color: var(--text-muted); font-size: 0.8rem;">Device: {} • {}</div>
+
+            let customer = job.job.customer_name.as_deref().unwrap_or("");
+            let due_info = job.job.due_date.as_deref().map(|d| {
+                format!(r#"<span style="color: var(--text-muted); font-size: 0.75rem;">Due {}</span>"#, &d[..10.min(d.len())])
+            }).unwrap_or_default();
+
+            let priority_dot = match job.job.priority.as_str() {
+                "HIGH" | "URGENT" => r#"<span style="color: var(--danger);">●</span>"#,
+                "MEDIUM" => r#"<span style="color: var(--warning);">●</span>"#,
+                _ => "",
+            };
+
+            htmls.push(format!(r##"<div class="job-overview-card" onclick="showPage('jobs')" style="cursor: pointer;">
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.75rem;">
+                    <div>
+                        <div style="font-weight: 600; font-size: 0.95rem;">{priority_dot} {name}</div>
+                        <div style="color: var(--text-muted); font-size: 0.8rem;">{customer}</div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem;">
+                        {status_badge}
+                        {due_info}
+                    </div>
                 </div>
-                <div style="color: var(--text-muted); font-size: 0.8rem;">{}</div>
-            </div>"##, barcode_short, scan.device_id, job_label, time_ago));
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                    <div>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 0.25rem;">
+                            <span style="color: var(--text-muted);">Rooms</span>
+                            <span style="font-weight: 500;">{completed_rooms}/{total_rooms}</span>
+                        </div>
+                        <div style="width: 100%; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden;">
+                            <div style="width: {room_pct}%; height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s;"></div>
+                        </div>
+                    </div>
+                    <div>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 0.25rem;">
+                            <span style="color: var(--text-muted);">Scans</span>
+                            <span style="font-weight: 500;">{scan_count}/{expected}</span>
+                        </div>
+                        <div style="width: 100%; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden;">
+                            <div style="width: {scan_pct}%; height: 100%; background: var(--success); border-radius: 3px; transition: width 0.3s;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted);">
+                    <span>🗄️ {total_cabs} cabinets</span>
+                </div>
+            </div>"##,
+                priority_dot = priority_dot,
+                name = job.job.name,
+                customer = customer,
+                status_badge = status_badge,
+                due_info = due_info,
+                completed_rooms = completed_rooms,
+                total_rooms = total_rooms,
+                room_pct = room_pct,
+                scan_count = job.scan_count,
+                expected = job.job.expected_count,
+                scan_pct = scan_pct,
+                total_cabs = total_cabs,
+            ));
         }
-        scan_htmls.join("")
+        htmls.join("")
     };
     
-    // Generate jobs status HTML
-    let jobs_status_html = if jobs_with_counts.is_empty() {
-        "<p style='color: var(--text-muted); font-style: italic;'>No jobs created yet</p>".to_string()
-    } else {
-        jobs_with_counts.iter().take(5).map(|job| {
-            let progress_percent = if job.job.expected_count > 0 {
-                (job.scan_count as f32 / job.job.expected_count as f32 * 100.0) as i32
-            } else {
-                0
-            };
-            let status_color = if progress_percent >= 100 { "var(--success)" } else if progress_percent > 50 { "var(--warning)" } else { "var(--text-muted)" };
-            format!(r##"<div style="margin-bottom: 1rem;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                    <span style="font-weight: 500; font-size: 0.9rem;">{}</span>
-                    <span style="color: {}; font-size: 0.8rem;">{} / {}</span>
-                </div>
-                <div style="width: 100%; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;">
-                    <div style="width: {}%; height: 100%; background: {}; border-radius: 3px;"></div>
-                </div>
-            </div>"##, job.job.name, status_color, job.scan_count, job.job.expected_count, progress_percent, status_color)
-        }).collect::<Vec<_>>().join("")
-    };
+    // Today's scan count for "recent activity" (only show section if meaningful)
+    let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+    let today_scans = state.repo.get_scan_count_since(&today).await.unwrap_or(0);
+    let show_scans_section = today_scans >= 10;
+    let scans_display = if show_scans_section { "" } else { "display: none;" };
     
     Html(format!(r##"<!DOCTYPE html>
 <html lang="en">
@@ -864,6 +894,33 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         .card-header h3 {{ font-size: 0.8rem; font-weight: 600; }}
         
         .card-body {{ padding: 0.75rem; position: relative; z-index: 1; }}
+
+        /* Job Overview Cards */
+        .job-overview-card {{
+            background: rgba(30, 41, 59, 0.25);
+            border: 0.5px solid var(--glass-edge);
+            border-radius: 0.75rem;
+            padding: 0.85rem;
+            transition: all var(--transition);
+            position: relative;
+            overflow: hidden;
+        }}
+        .job-overview-card::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, var(--accent) 0%, transparent 100%);
+            opacity: 0.5;
+        }}
+        .job-overview-card:hover {{
+            background: rgba(30, 41, 59, 0.4);
+            border-color: var(--glass-edge-strong);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+        }}
         
         table {{
             width: 100%;
@@ -1030,6 +1087,7 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
         .badge-warning {{ background: rgba(251, 146, 60, 0.2); color: var(--warning); }}
         .badge-danger {{ background: rgba(239, 68, 68, 0.2); color: var(--danger); }}
         .badge-info {{ background: rgba(99, 102, 241, 0.2); color: var(--accent); }}
+        .badge-muted {{ background: rgba(148, 163, 184, 0.15); color: var(--text-muted); }}
         
         /* Toast notifications */
         .toast-container {{
@@ -2008,41 +2066,31 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
             <!-- Dashboard Page -->
             <div class="page active" id="page-dashboard">
                 <div class="page-header">
-                    <h2>Control Center</h2>
+                    <h2>Company Overview</h2>
                     <button class="btn btn-outline" onclick="refreshAll()">🔄 Refresh</button>
                 </div>
                 
                 <!-- Top Stats Row -->
-                <div class="stats">
-                    <div class="stat-card" onclick="showPage('devices')" style="cursor:pointer;">
-                        <div class="stat-icon">📱</div>
-                        <div class="stat-value" id="stat-devices">{device_count}</div>
-                        <div class="stat-label">Devices</div>
-                    </div>
-                    <div class="stat-card" onclick="showPage('scans')" style="cursor:pointer;">
-                        <div class="stat-icon">🏷️</div>
-                        <div class="stat-value" id="stat-scans">{scan_count}</div>
-                        <div class="stat-label">Scans</div>
-                    </div>
+                <div class="stats" style="grid-template-columns: repeat(4, 1fr);">
                     <div class="stat-card" onclick="showPage('jobs')" style="cursor:pointer;">
                         <div class="stat-icon">🗂️</div>
-                        <div class="stat-value" id="stat-jobs">{job_count}</div>
-                        <div class="stat-label">Jobs</div>
+                        <div class="stat-value" id="stat-jobs">{active_job_count}</div>
+                        <div class="stat-label">Active Jobs</div>
                     </div>
                     <div class="stat-card" onclick="showPage('timeclock')" style="cursor:pointer;">
-                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-icon">👷</div>
                         <div class="stat-value" id="stat-workers">{active_worker_count}</div>
                         <div class="stat-label">Working Now</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">⏱️</div>
-                        <div class="stat-value" id="stat-uptime">{uptime}</div>
-                        <div class="stat-label">Uptime</div>
                     </div>
                     <div class="stat-card" onclick="showPage('reports')" style="cursor:pointer;">
                         <div class="stat-icon">📋</div>
                         <div class="stat-value" id="stat-reports">{report_count}</div>
                         <div class="stat-label">Reports</div>
+                    </div>
+                    <div class="stat-card" onclick="showPage('devices')" style="cursor:pointer;">
+                        <div class="stat-icon">📱</div>
+                        <div class="stat-value" id="stat-devices">{device_count}</div>
+                        <div class="stat-label">Devices</div>
                     </div>
                 </div>
 
@@ -2057,7 +2105,21 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     </div>
                 </div>
 
-                <!-- Two column grid: Today's Reports + Job Progress -->
+                <!-- Active Jobs with Room Progress -->
+                <div class="card" style="margin-bottom: 1rem;">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h3>🗂️ Active Jobs</h3>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <span class="badge badge-muted" style="font-size: 0.75rem;">{active_job_count} active · {completed_job_count} completed</span>
+                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('jobs')">View All →</button>
+                        </div>
+                    </div>
+                    <div class="card-body" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 0.75rem;">
+                        {active_jobs_html}
+                    </div>
+                </div>
+
+                <!-- Two column grid: Today's Reports + Today's Hours -->
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
                     <!-- Today's Reports -->
                     <div class="card">
@@ -2070,31 +2132,6 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                         </div>
                     </div>
 
-                    <!-- Job Progress -->
-                    <div class="card">
-                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-                            <h3>🗂️ Job Progress</h3>
-                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('jobs')">View All →</button>
-                        </div>
-                        <div class="card-body">
-                            {jobs_status_html}
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Two column grid: Recent Activity + Quick Actions -->
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
-                    <!-- Recent Activity -->
-                    <div class="card">
-                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-                            <h3>📡 Recent Activity</h3>
-                            <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('scans')">View All →</button>
-                        </div>
-                        <div class="card-body">
-                            {recent_scans_html}
-                        </div>
-                    </div>
-
                     <!-- Quick Actions + Server Info -->
                     <div class="card">
                         <div class="card-header">
@@ -2103,14 +2140,25 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                         <div class="card-body">
                             <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;">
                                 <button class="btn btn-primary" onclick="showPage('jobs'); openJobModal()">+ New Job</button>
-                                <button class="btn btn-outline" onclick="showPage('scans')">View Scans</button>
-                                <button class="btn btn-outline" onclick="showPage('devices')">Manage Devices</button>
                                 <button class="btn btn-outline" onclick="showPage('timesheets')">📋 Timesheets</button>
+                                <button class="btn btn-outline" onclick="showPage('devices')">Manage Devices</button>
+                                <button class="btn btn-outline" onclick="showPage('scans')">View Scans</button>
                             </div>
                             <div style="font-size: 0.85rem; color: var(--text-muted);">
                                 <strong>Version:</strong> {version} · <span class="badge badge-success">Online</span>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Scan Activity (only shown when meaningful) -->
+                <div class="card" id="dash-scan-activity" style="margin-bottom: 1rem; {scans_display}">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h3>📡 Today's Scan Activity <span class="badge badge-success" style="font-size: 0.75rem; margin-left: 0.5rem;">{today_scans} today</span></h3>
+                        <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.3rem 0.8rem;" onclick="showPage('scans')">View All →</button>
+                    </div>
+                    <div class="card-body" id="dash-recent-scans">
+                        <div style="text-align: center; color: var(--text-muted); padding: 1rem;"><div class="spinner"></div>Loading...</div>
                     </div>
                 </div>
 
@@ -3388,7 +3436,9 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                 if (cel) cel.textContent = completed;
                 
                 sortAndRenderJobs();
-                document.getElementById('stat-jobs').textContent = jobs.length;
+                const activeJobs = jobs.filter(j => j.status !== 'COMPLETED' && j.status !== 'CANCELLED');
+                const el = document.getElementById('stat-jobs');
+                if (el) el.textContent = activeJobs.length;
             }} catch (e) {{
                 console.error('Failed to load jobs:', e);
             }}
@@ -3982,8 +4032,6 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                 scans = data.scans || [];
                 allScansData = scans;
                 
-                document.getElementById('stat-scans').textContent = data.total || scans.length;
-                
                 regroupScansPage();
             }} catch (e) {{
                 console.error('Failed to load scans:', e);
@@ -4290,8 +4338,6 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                     if (totalEl) totalEl.textContent = parseInt(totalEl.textContent) - 1;
                     // Also remove from in-memory array
                     allScansData = allScansData.filter(s => s.id !== scanId);
-                    const statEl = document.getElementById('stat-scans');
-                    if (statEl) statEl.textContent = allScansData.length;
                 }}, 300);
             }}
         }}
@@ -4880,6 +4926,10 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                         const onBreak = members.filter(m => m.status === 'break');
                         const offline = members.filter(m => m.status === 'offline');
 
+                        // Update stat card
+                        const workersEl = document.getElementById('stat-workers');
+                        if (workersEl) workersEl.textContent = working.length;
+
                         // Summary bar
                         let html = `<div style="display: flex; gap: 1rem; margin-bottom: 0.75rem; font-size: 0.85rem; flex-wrap: wrap;">
                             <span style="color: var(--success); font-weight: 600;">🟢 ${{working.length}} Working</span>
@@ -5046,6 +5096,39 @@ async fn dashboard_inner(state: &SharedState) -> Html<String> {
                 const adminSection = document.getElementById('dash-admin-section');
                 if (adminSection) adminSection.style.display = 'none';
             }}
+
+            // 4. Scan activity (load recent scans for the activity section)
+            try {{
+                const scanSection = document.getElementById('dash-scan-activity');
+                const scanContainer = document.getElementById('dash-recent-scans');
+                if (scanSection && scanContainer) {{
+                    const resp = await fetch('/api/scans?limit=10');
+                    const data = await resp.json();
+                    if (data.success) {{
+                        const scansArr = data.scans || [];
+                        const today = new Date().toISOString().split('T')[0];
+                        const todayScans = scansArr.filter(s => s.scanned_at && s.scanned_at.startsWith(today));
+                        if (todayScans.length >= 10) {{
+                            scanSection.style.display = '';
+                            let html = '';
+                            todayScans.slice(0, 8).forEach(s => {{
+                                const barcode = s.barcode.length > 25 ? s.barcode.slice(0, 22) + '...' : s.barcode;
+                                const job = getJobName(s.job_id) || 'Unassigned';
+                                html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--border);">
+                                    <div>
+                                        <div style="font-weight: 500; font-size: 0.85rem;">${{barcode}}</div>
+                                        <div style="color: var(--text-muted); font-size: 0.75rem;">${{s.device_id}} · ${{job}}</div>
+                                    </div>
+                                    <div style="color: var(--text-muted); font-size: 0.75rem;">${{formatElapsed(s.scanned_at)}}</div>
+                                </div>`;
+                            }});
+                            scanContainer.innerHTML = html || '<p style="color: var(--text-muted); font-style: italic;">No scans today</p>';
+                        }} else {{
+                            scanSection.style.display = 'none';
+                        }}
+                    }}
+                }}
+            }} catch (e) {{ console.error('Dashboard scan activity failed:', e); }}
         }}
 
         // ==================== TEAM ====================
@@ -6148,7 +6231,7 @@ pub async fn map_page(State(state): State<SharedState>) -> impl IntoResponse {
     let state = state.read().await;
     
     // Get scan locations
-    let scan_locations = state.repo.get_scan_locations().await.unwrap_or_default();
+    let scan_locations = state.repo.get_scan_locations(5000).await.unwrap_or_default();
     let locations_json = serde_json::to_string(&scan_locations).unwrap_or_else(|_| "[]".to_string());
     
     Html(format!(r##"<!DOCTYPE html>
