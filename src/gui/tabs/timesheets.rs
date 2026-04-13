@@ -1,6 +1,7 @@
 use crate::api::routes::SharedState;
 use crate::db::models::{TimesheetDay, LocationPingRecord};
 use eframe::egui;
+use std::collections::HashSet;
 
 /// Timesheets tab showing time entries grouped by day
 /// Admins see all workers; regular users see only their own entries
@@ -15,6 +16,12 @@ pub struct TimesheetsTab {
     pub show_map_window: bool,
     pub map_pings: Vec<LocationPingRecord>,
     pub map_title: String,
+    /// Whether we are in selection mode
+    pub select_mode: bool,
+    /// UUIDs of selected time entries
+    pub selected_entries: HashSet<String>,
+    /// Whether the delete confirmation dialog is open
+    pub show_delete_confirm: bool,
 }
 
 impl Default for TimesheetsTab {
@@ -30,6 +37,9 @@ impl Default for TimesheetsTab {
             show_map_window: false,
             map_pings: Vec::new(),
             map_title: String::new(),
+            select_mode: false,
+            selected_entries: HashSet::new(),
+            show_delete_confirm: false,
         }
     }
 }
@@ -154,9 +164,119 @@ impl TimesheetsTab {
                         if ui.add(refresh_btn).clicked() {
                             self.last_refresh = None;
                         }
+
+                        ui.add_space(8.0);
+
+                        // Select mode toggle
+                        let select_btn = egui::Button::new(
+                            if self.select_mode {
+                                egui::RichText::new("✕ Cancel").color(egui::Color32::WHITE)
+                            } else {
+                                egui::RichText::new("☐ Select").color(egui::Color32::WHITE)
+                            },
+                        )
+                        .fill(if self.select_mode {
+                            egui::Color32::from_rgb(107, 114, 128)
+                        } else {
+                            egui::Color32::from_rgb(99, 102, 241)
+                        })
+                        .rounding(egui::Rounding::same(6.0));
+                        if ui.add(select_btn).clicked() {
+                            self.select_mode = !self.select_mode;
+                            if !self.select_mode {
+                                self.selected_entries.clear();
+                            }
+                        }
+
+                        // Delete button (only in select mode with items selected)
+                        if self.select_mode && !self.selected_entries.is_empty() {
+                            ui.add_space(8.0);
+                            let del_btn = egui::Button::new(
+                                egui::RichText::new(format!("🗑 Delete ({})", self.selected_entries.len()))
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(239, 68, 68))
+                            .rounding(egui::Rounding::same(6.0));
+                            if ui.add(del_btn).clicked() {
+                                self.show_delete_confirm = true;
+                            }
+                        }
                     });
                 });
             });
+
+        // Delete confirmation dialog
+        if self.show_delete_confirm {
+            let count = self.selected_entries.len();
+            let mut do_delete = false;
+            let mut cancel = false;
+
+            egui::Window::new("Confirm Delete")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("⚠️")
+                            .size(32.0),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Are you sure you want to delete {} time {}?",
+                            count,
+                            if count == 1 { "entry" } else { "entries" }
+                        ))
+                        .size(14.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("This will also remove associated GPS location data. This action cannot be undone.")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let cancel_btn = egui::Button::new(
+                            egui::RichText::new("Cancel").color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(107, 114, 128))
+                        .rounding(egui::Rounding::same(6.0));
+                        if ui.add(cancel_btn).clicked() {
+                            cancel = true;
+                        }
+
+                        ui.add_space(8.0);
+
+                        let confirm_btn = egui::Button::new(
+                            egui::RichText::new(format!("🗑 Delete {}", count)).color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(239, 68, 68))
+                        .rounding(egui::Rounding::same(6.0));
+                        if ui.add(confirm_btn).clicked() {
+                            do_delete = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+
+            if cancel {
+                self.show_delete_confirm = false;
+            }
+
+            if do_delete {
+                let uuids: Vec<String> = self.selected_entries.iter().cloned().collect();
+                let s = state.clone();
+                runtime.block_on(async {
+                    let state = s.read().await;
+                    let _ = state.repo.delete_time_entries(&uuids).await;
+                });
+                self.selected_entries.clear();
+                self.select_mode = false;
+                self.show_delete_confirm = false;
+                self.last_refresh = None; // trigger refresh
+            }
+        }
 
         ui.add_space(16.0);
 
@@ -315,6 +435,15 @@ impl TimesheetsTab {
         // Collect actions from the closure instead of mutating self inside
         let mut toggle_expand = false;
         let mut open_map = false;
+        let mut entry_toggles: Vec<(String, bool)> = Vec::new();
+        let mut select_all_day = false;
+        let mut deselect_all_day = false;
+        let in_select_mode = self.select_mode;
+
+        // Pre-compute selection state for this day's entries
+        let day_entry_uuids: Vec<String> = day.entries.iter().map(|e| e.uuid.clone()).collect();
+        let all_selected = !day_entry_uuids.is_empty()
+            && day_entry_uuids.iter().all(|u| self.selected_entries.contains(u));
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(40, 40, 58))
@@ -323,6 +452,18 @@ impl TimesheetsTab {
             .show(ui, |ui| {
                 // Header row
                 ui.horizontal(|ui| {
+                    // Select-all checkbox for this day (only in select mode)
+                    if in_select_mode {
+                        let mut checked = all_selected;
+                        if ui.checkbox(&mut checked, "").clicked() {
+                            if checked {
+                                select_all_day = true;
+                            } else {
+                                deselect_all_day = true;
+                            }
+                        }
+                    }
+
                     // Date
                     ui.label(
                         egui::RichText::new(&day.date)
@@ -398,6 +539,9 @@ impl TimesheetsTab {
                         .striped(true)
                         .min_col_width(80.0)
                         .show(ui, |ui| {
+                            if in_select_mode {
+                                ui.label(egui::RichText::new("").size(11.0));
+                            }
                             ui.label(egui::RichText::new("Type").strong().size(11.0));
                             ui.label(egui::RichText::new("Job").strong().size(11.0));
                             ui.label(egui::RichText::new("Clock In").strong().size(11.0));
@@ -407,6 +551,15 @@ impl TimesheetsTab {
                             ui.end_row();
 
                             for entry in &day.entries {
+                                // Per-entry checkbox
+                                if in_select_mode {
+                                    let was_selected = self.selected_entries.contains(&entry.uuid);
+                                    let mut checked = was_selected;
+                                    if ui.checkbox(&mut checked, "").clicked() {
+                                        entry_toggles.push((entry.uuid.clone(), checked));
+                                    }
+                                }
+
                                 let type_label = if entry.is_break != 0 {
                                     egui::RichText::new("☕ Break").color(egui::Color32::from_rgb(251, 191, 36)).size(11.0)
                                 } else {
@@ -456,6 +609,25 @@ impl TimesheetsTab {
                         });
                 }
             });
+
+        // Apply selection mutations
+        for (uuid, checked) in entry_toggles {
+            if checked {
+                self.selected_entries.insert(uuid);
+            } else {
+                self.selected_entries.remove(&uuid);
+            }
+        }
+        if select_all_day {
+            for uuid in &day_entry_uuids {
+                self.selected_entries.insert(uuid.clone());
+            }
+        }
+        if deselect_all_day {
+            for uuid in &day_entry_uuids {
+                self.selected_entries.remove(uuid);
+            }
+        }
 
         // Apply mutations after all UI closures are done
         if toggle_expand {

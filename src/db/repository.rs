@@ -1751,6 +1751,32 @@ impl Repository {
         Ok(result.0 > 0)
     }
 
+    /// Delete time entries by their UUIDs (also removes related location pings)
+    pub async fn delete_time_entries(&self, uuids: &[String]) -> anyhow::Result<u64> {
+        if uuids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<&str> = uuids.iter().map(|_| "?").collect();
+        let ph = placeholders.join(", ");
+
+        // Delete related location pings first
+        let pings_sql = format!("DELETE FROM location_pings WHERE time_entry_id IN ({})", ph);
+        let mut q = sqlx::query(&pings_sql);
+        for uuid in uuids {
+            q = q.bind(uuid);
+        }
+        let _ = q.execute(&self.pool).await;
+
+        // Delete the time entries
+        let entries_sql = format!("DELETE FROM time_entries WHERE uuid IN ({})", ph);
+        let mut q = sqlx::query(&entries_sql);
+        for uuid in uuids {
+            q = q.bind(uuid);
+        }
+        let result = q.execute(&self.pool).await?;
+        Ok(result.rows_affected())
+    }
+
     /// Get active time entries (currently clocked in)
     pub async fn get_active_time_entries(&self) -> anyhow::Result<Vec<TimeEntryRecord>> {
         let entries = sqlx::query_as::<_, TimeEntryRecord>(
