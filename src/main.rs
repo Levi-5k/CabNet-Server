@@ -3,7 +3,7 @@ use codebar_server::config::{Config, get_data_dir};
 use codebar_server::db::{init_pool, repository::Repository};
 use codebar_server::gui::CodeBarApp;
 use codebar_server::gui::tabs::settings::auto_backup_on_startup;
-use codebar_server::services::{create_tunnel_manager, TunnelConfig};
+use codebar_server::services::{create_tunnel_manager, PushNotificationService, TunnelConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -44,22 +44,24 @@ fn main() -> anyhow::Result<()> {
     // Create tunnel manager
     let tunnel_manager = create_tunnel_manager(port);
 
-    // Auto-start tunnel if configured
+    // Cloudflare tunnel is required for app/device access. The HTTP server binds to localhost;
+    // cloudflared is responsible for exposing it publicly.
     if let Some(tunnel_config) = TunnelConfig::load() {
         tracing::info!("Loaded tunnel config: tunnel_name={}, domain={}, subdomain={}, enabled={}", 
             tunnel_config.tunnel_name, tunnel_config.domain, tunnel_config.subdomain, tunnel_config.enabled);
-        if tunnel_config.is_configured() {
-            tracing::info!("Cloudflare tunnel configured for {}, starting...", tunnel_config.full_domain());
-            if let Ok(mut manager) = tunnel_manager.lock() {
-                if let Err(e) = manager.start() {
-                    tracing::warn!("Failed to auto-start tunnel: {}", e);
-                }
-            }
-        } else {
-            tracing::info!("Tunnel config found but not fully configured (enabled={})", tunnel_config.enabled);
-        }
     } else {
         tracing::info!("No tunnel configuration found at {}", data_dir.join("tunnel_config.json").display());
+    }
+
+    let tunnel_start_error = if let Ok(mut manager) = tunnel_manager.lock() {
+        tracing::info!("Starting required Cloudflare tunnel...");
+        manager.start().err()
+    } else {
+        Some("Could not acquire Cloudflare tunnel manager".to_string())
+    };
+
+    if let Some(error) = &tunnel_start_error {
+        tracing::warn!("Cloudflare tunnel is not running yet: {}", error);
     }
 
     // Create tokio runtime
@@ -70,9 +72,16 @@ fn main() -> anyhow::Result<()> {
     let state: SharedState = runtime.block_on(async {
         let pool = init_pool(&config.database.path).await?;
         let repo = Repository::new(pool);
+        let push_notifications = PushNotificationService::from_env();
+        if push_notifications.is_configured() {
+            tracing::info!("APNs push delivery configured");
+        } else {
+            tracing::info!("APNs push delivery disabled; unread polling remains available");
+        }
 
         Ok::<_, anyhow::Error>(Arc::new(RwLock::new(AppState {
             repo,
+            push_notifications,
             start_time: std::time::Instant::now(),
         })))
     })?;
@@ -102,7 +111,8 @@ fn main() -> anyhow::Result<()> {
     // Check if we have a display available
     let has_display = std::env::var("DISPLAY").is_ok() || 
                      std::env::var("WAYLAND_DISPLAY").is_ok() || 
-                     cfg!(windows); // Windows always has display
+                     cfg!(windows) ||
+                     cfg!(target_os = "macos");
 
     if has_display {
         eframe::run_native(
@@ -120,6 +130,13 @@ fn main() -> anyhow::Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
     } else {
+        if let Some(error) = tunnel_start_error {
+            return Err(anyhow::anyhow!(
+                "Cloudflare tunnel setup is required, but no desktop display is available to open setup: {}",
+                error
+            ));
+        }
+
         tracing::info!("Running in headless mode - GUI disabled");
         // In headless mode, just keep the HTTP server running
         // Wait for shutdown signal

@@ -454,6 +454,10 @@ pub struct TeamMember {
     pub role: String,
     pub is_admin: i32,
     pub avatar_color: Option<String>,
+    pub active_hours_enabled: i32,
+    pub active_hours_start_minutes: i32,
+    pub active_hours_end_minutes: i32,
+    pub active_hours_utc_offset_minutes: i32,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -467,6 +471,10 @@ pub struct TeamMemberInput {
     pub role: Option<String>,
     pub is_admin: Option<bool>,
     pub avatar_color: Option<String>,
+    pub active_hours_enabled: Option<bool>,
+    pub active_hours_start_minutes: Option<i32>,
+    pub active_hours_end_minutes: Option<i32>,
+    pub active_hours_utc_offset_minutes: Option<i32>,
 }
 
 /// Team member with current status (joined from devices + time_entries)
@@ -480,9 +488,131 @@ pub struct TeamMemberStatus {
     pub avatar_color: Option<String>,
     pub status: String,           // "working", "break", "offline"
     pub current_job: Option<String>,
+    pub current_job_id: Option<String>,
     pub clock_in: Option<String>,
     pub last_seen: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub accuracy: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading: Option<f64>,
+    pub is_driving: bool,
+    pub status_label: String,
+    pub unread_count: i64,
     pub total_scans_today: i64,
+}
+
+// ==================== TEAM MESSAGING ====================
+
+/// Team message thread metadata for direct messages and job channels
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TeamMessageThread {
+    pub id: i64,
+    pub uuid: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub job_id: Option<String>,
+    pub job_name: Option<String>,
+    pub created_by_device_id: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub last_message_at: Option<String>,
+}
+
+/// Thread list item with last-message preview and unread count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamThreadSummary {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub job_id: Option<String>,
+    pub job_name: Option<String>,
+    pub participant_device_id: Option<String>,
+    pub participant_name: Option<String>,
+    pub last_message: Option<String>,
+    pub last_message_sender: Option<String>,
+    pub last_message_at: Option<String>,
+    pub unread_count: i64,
+    pub is_muted: bool,
+    pub updated_at: Option<String>,
+}
+
+/// Message record stored by the server
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TeamMessage {
+    pub id: i64,
+    pub uuid: String,
+    pub thread_id: String,
+    pub sender_device_id: String,
+    pub sender_name: Option<String>,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+    pub delivery_status: String,
+}
+
+/// Input for creating or finding a thread
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamThreadInput {
+    pub device_id: String,
+    pub kind: String,
+    pub participant_device_id: Option<String>,
+    pub job_id: Option<String>,
+    pub job_name: Option<String>,
+    pub title: Option<String>,
+    pub channel_name: Option<String>,
+}
+
+/// Input for sending a message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamMessageInput {
+    pub device_id: String,
+    pub sender_name: Option<String>,
+    pub body: String,
+    pub created_at: Option<i64>,
+}
+
+/// Input for marking a thread read
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamReadReceiptInput {
+    pub device_id: String,
+    pub read_up_to_message_id: Option<String>,
+}
+
+/// Per-thread unread count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamUnreadThreadCount {
+    pub thread_id: String,
+    pub unread_count: i64,
+}
+
+/// Aggregate unread count response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamUnreadSummary {
+    pub total_unread: i64,
+    pub threads: Vec<TeamUnreadThreadCount>,
+}
+
+/// Push token registration input. Delivery can be configured separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushTokenInput {
+    pub device_id: String,
+    pub token: String,
+    pub platform: Option<String>,
+    pub environment: Option<String>,
+    pub bundle_id: Option<String>,
+}
+
+/// Registered push destination for a message recipient.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PushDeliveryTarget {
+    pub token_id: i64,
+    pub device_id: String,
+    pub token: String,
+    pub platform: Option<String>,
+    pub environment: Option<String>,
+    pub bundle_id: Option<String>,
 }
 
 /// Timesheet summary for a day

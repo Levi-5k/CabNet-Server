@@ -34,8 +34,8 @@ impl Default for ScansTab {
 }
 
 impl ScansTab {
-    pub fn ui(&mut self, ui: &mut egui::Ui, data: &CachedData, state: &SharedState, runtime: &tokio::runtime::Handle) -> bool {
-        let mut needs_refresh = false;
+    pub fn ui(&mut self, ui: &mut egui::Ui, data: &CachedData, _state: &SharedState, _runtime: &tokio::runtime::Handle) -> bool {
+        let needs_refresh = false;
 
         // Header
         ui.horizontal(|ui| {

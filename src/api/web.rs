@@ -6,7 +6,6 @@ use axum::{
     http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
 
 use super::routes::SharedState;
 
@@ -6464,25 +6463,5 @@ fn format_uptime(seconds: u64) -> String {
         format!("{}h {}m", hours, minutes)
     } else {
         format!("{}m", minutes.max(1))
-    }
-}
-
-fn format_time_ago(timestamp: &str) -> String {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(timestamp) {
-        let now = Utc::now();
-        let duration = now.signed_duration_since(dt.with_timezone(&Utc));
-        let seconds = duration.num_seconds() as u64;
-        
-        if seconds < 60 {
-            "Just now".to_string()
-        } else if seconds < 3600 {
-            format!("{}m ago", seconds / 60)
-        } else if seconds < 86400 {
-            format!("{}h ago", seconds / 3600)
-        } else {
-            format!("{}d ago", seconds / 86400)
-        }
-    } else {
-        "Unknown".to_string()
     }
 }

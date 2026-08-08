@@ -536,11 +536,17 @@ impl TeamTab {
                                     role: Some(self.new_member_role.clone()),
                                     is_admin: Some(self.new_member_admin),
                                     avatar_color: None,
+                                    active_hours_enabled: None,
+                                    active_hours_start_minutes: None,
+                                    active_hours_end_minutes: None,
+                                    active_hours_utc_offset_minutes: None,
                                 };
                                 let s = state.clone();
                                 runtime.block_on(async {
                                     let state = s.read().await;
-                                    let _ = state.repo.upsert_team_member(&input).await;
+                                    if state.repo.upsert_team_member(&input).await.is_ok() {
+                                        let _ = state.repo.clear_device_account_deleted(&input.device_id).await;
+                                    }
                                 });
                                 self.show_add_dialog = false;
                                 self.new_member_name.clear();

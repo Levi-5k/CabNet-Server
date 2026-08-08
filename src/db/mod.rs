@@ -14,8 +14,15 @@ pub async fn init_pool(database_path: &Path) -> anyhow::Result<SqlitePool> {
     let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(20)
         .connect(&database_url)
+        .await?;
+
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = NORMAL")
+        .execute(&pool)
         .await?;
 
     // Run migrations
@@ -488,6 +495,18 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_device_time_desc ON location_pings(device_id, timestamp DESC)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_location_pings_entry_time_desc ON location_pings(time_entry_id, timestamp DESC)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_time_entries_active_device ON time_entries(device_id, clock_out, clock_in DESC)")
+        .execute(pool)
+        .await?;
+
     // Team members table
     sqlx::query(
         r#"
@@ -499,6 +518,10 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             role TEXT DEFAULT 'worker',
             is_admin INTEGER DEFAULT 0,
             avatar_color TEXT,
+            active_hours_enabled INTEGER DEFAULT 1,
+            active_hours_start_minutes INTEGER DEFAULT 300,
+            active_hours_end_minutes INTEGER DEFAULT 1020,
+            active_hours_utc_offset_minutes INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -511,8 +534,210 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN phone_number TEXT")
         .execute(pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN active_hours_enabled INTEGER DEFAULT 1")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN active_hours_start_minutes INTEGER DEFAULT 300")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN active_hours_end_minutes INTEGER DEFAULT 1020")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE team_members ADD COLUMN active_hours_utc_offset_minutes INTEGER DEFAULT 0")
+        .execute(pool)
+        .await;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_team_members_device_id ON team_members(device_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_team_members_role ON team_members(role)")
+        .execute(pool)
+        .await?;
+
+    // Deleted app accounts are kept as tombstones so reconnect cannot recreate access.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS deleted_device_accounts (
+            device_id TEXT PRIMARY KEY NOT NULL,
+            deleted_at TEXT NOT NULL,
+            reason TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Team messaging threads
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_threads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT,
+            job_id TEXT,
+            job_name TEXT,
+            created_by_device_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_message_at TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_threads_kind ON message_threads(kind)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_threads_job_id ON message_threads(job_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_threads_updated_at ON message_threads(updated_at)")
+        .execute(pool)
+        .await?;
+
+    // Team messaging membership and read state
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_thread_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            display_name TEXT,
+            joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_read_message_id TEXT,
+            last_read_at TEXT,
+            is_muted INTEGER DEFAULT 0,
+            UNIQUE(thread_id, device_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_thread_members_device ON message_thread_members(device_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_thread_members_thread ON message_thread_members(thread_id)")
+        .execute(pool)
+        .await?;
+
+    // Team messages
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            thread_id TEXT NOT NULL,
+            sender_device_id TEXT NOT NULL,
+            sender_name TEXT,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            deleted_at TEXT,
+            delivery_status TEXT DEFAULT 'delivered'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON messages(thread_id, created_at DESC)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_device_id)")
+        .execute(pool)
+        .await?;
+
+    // Per-recipient unread tracking for messages
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_unread_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            is_read INTEGER DEFAULT 0,
+            read_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(message_id, device_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_unread_device_thread ON message_unread_status(device_id, thread_id, is_read)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_unread_thread ON message_unread_status(thread_id)")
+        .execute(pool)
+        .await?;
+
+    // Job-specific message channels
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS job_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE NOT NULL,
+            job_id TEXT NOT NULL,
+            channel_name TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            created_by_device_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_id, channel_name)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_job_channels_job_id ON job_channels(job_id)")
+        .execute(pool)
+        .await?;
+
+    // APNs tokens and delivery log. Push can be disabled by config while unread polling still works.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS push_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            platform TEXT DEFAULT 'apns',
+            environment TEXT DEFAULT 'production',
+            bundle_id TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            disabled_at TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_push_tokens_device ON push_tokens(device_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS push_delivery_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT,
+            thread_id TEXT,
+            device_id TEXT NOT NULL,
+            token_id INTEGER,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            attempted_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_push_delivery_device ON push_delivery_log(device_id, attempted_at DESC)")
         .execute(pool)
         .await?;
 

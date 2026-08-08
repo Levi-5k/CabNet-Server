@@ -696,6 +696,22 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn is_device_account_deleted(&self, device_id: &str) -> anyhow::Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deleted_device_accounts WHERE device_id = ?")
+            .bind(device_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn clear_device_account_deleted(&self, device_id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM deleted_device_accounts WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Get all devices with enhanced status information
     pub async fn get_devices_with_status(&self) -> anyhow::Result<Vec<Device>> {
         Ok(sqlx::query_as::<_, Device>(
@@ -2105,16 +2121,32 @@ impl Repository {
         let role = input.role.clone().unwrap_or_else(|| "worker".to_string());
         let is_admin_insert = input.is_admin.unwrap_or(false) as i32;
         let is_admin_update: Option<i32> = input.is_admin.map(|v| v as i32);
+        let active_hours_enabled_insert = input.active_hours_enabled.unwrap_or(true) as i32;
+        let active_hours_enabled_update: Option<i32> = input.active_hours_enabled.map(|v| v as i32);
+        let active_hours_start_insert = input.active_hours_start_minutes.unwrap_or(300).clamp(0, 1439);
+        let active_hours_start_update = input.active_hours_start_minutes.map(|v| v.clamp(0, 1439));
+        let active_hours_end_insert = input.active_hours_end_minutes.unwrap_or(1020).clamp(0, 1439);
+        let active_hours_end_update = input.active_hours_end_minutes.map(|v| v.clamp(0, 1439));
+        let active_hours_offset_insert = input.active_hours_utc_offset_minutes.unwrap_or(0).clamp(-1440, 1440);
+        let active_hours_offset_update = input.active_hours_utc_offset_minutes.map(|v| v.clamp(-1440, 1440));
 
         let result = sqlx::query(
-            r#"INSERT INTO team_members (device_id, display_name, phone_number, role, is_admin, avatar_color, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            r#"INSERT INTO team_members (
+                device_id, display_name, phone_number, role, is_admin, avatar_color,
+                active_hours_enabled, active_hours_start_minutes, active_hours_end_minutes,
+                active_hours_utc_offset_minutes, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 phone_number = COALESCE(excluded.phone_number, team_members.phone_number),
                 role = excluded.role,
                 is_admin = COALESCE(?, team_members.is_admin),
                 avatar_color = COALESCE(excluded.avatar_color, team_members.avatar_color),
+                active_hours_enabled = COALESCE(?, team_members.active_hours_enabled),
+                active_hours_start_minutes = COALESCE(?, team_members.active_hours_start_minutes),
+                active_hours_end_minutes = COALESCE(?, team_members.active_hours_end_minutes),
+                active_hours_utc_offset_minutes = COALESCE(?, team_members.active_hours_utc_offset_minutes),
                 updated_at = excluded.updated_at"#,
         )
         .bind(&input.device_id)
@@ -2123,8 +2155,16 @@ impl Repository {
         .bind(&role)
         .bind(is_admin_insert)
         .bind(&input.avatar_color)
+        .bind(active_hours_enabled_insert)
+        .bind(active_hours_start_insert)
+        .bind(active_hours_end_insert)
+        .bind(active_hours_offset_insert)
         .bind(&now)
         .bind(is_admin_update) // 8th param: nullable for ON CONFLICT update
+        .bind(active_hours_enabled_update)
+        .bind(active_hours_start_update)
+        .bind(active_hours_end_update)
+        .bind(active_hours_offset_update)
         .execute(&self.pool)
         .await?;
 
@@ -2150,10 +2190,29 @@ impl Repository {
 
     /// Delete a team member
     pub async fn delete_team_member(&self, device_id: &str) -> anyhow::Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+
         let result = sqlx::query("DELETE FROM team_members WHERE device_id = ?")
             .bind(device_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                r#"INSERT INTO deleted_device_accounts (device_id, deleted_at, reason)
+                   VALUES (?, ?, 'Team member deleted')
+                   ON CONFLICT(device_id) DO UPDATE SET
+                       deleted_at = excluded.deleted_at,
+                       reason = excluded.reason"#,
+            )
+            .bind(device_id)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -2192,6 +2251,8 @@ impl Repository {
 
     /// Get team members with their current status (working/break/offline)
     pub async fn get_team_status(&self) -> anyhow::Result<Vec<TeamMemberStatus>> {
+        const DRIVING_THRESHOLD_MPS: f64 = 6.7056;
+
         // Get all registered team members
         let members = self.get_team_members().await?;
 
@@ -2208,12 +2269,53 @@ impl Repository {
             let on_break = active_breaks.iter().find(|e| e.device_id == member.device_id);
             let working = active_work.iter().find(|e| e.device_id == member.device_id);
 
-            let (status, current_job, clock_in) = if let Some(entry) = on_break {
-                ("break".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
+            let (status, current_job, current_job_id, clock_in) = if let Some(entry) = on_break {
+                (
+                    "break".to_string(),
+                    entry.job_name.clone().or(entry.customer_name.clone()),
+                    entry.job_id.clone(),
+                    Some(entry.clock_in.clone()),
+                )
             } else if let Some(entry) = working {
-                ("working".to_string(), entry.job_name.clone().or(entry.customer_name.clone()), Some(entry.clock_in.clone()))
+                (
+                    "working".to_string(),
+                    entry.job_name.clone().or(entry.customer_name.clone()),
+                    entry.job_id.clone(),
+                    Some(entry.clock_in.clone()),
+                )
             } else {
-                ("offline".to_string(), None, None)
+                ("offline".to_string(), None, None, None)
+            };
+
+            let latest_location: Option<(f64, f64, Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+                r#"SELECT latitude, longitude, accuracy, speed, heading
+                   FROM location_pings
+                   WHERE device_id = ?
+                   ORDER BY timestamp DESC
+                   LIMIT 1"#,
+            )
+            .bind(&member.device_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let (latitude, longitude, accuracy, speed, heading) = latest_location
+                .map(|location| (Some(location.0), Some(location.1), location.2, location.3, location.4))
+                .unwrap_or((None, None, None, None, None));
+            let is_driving = matches!(speed, Some(value) if value >= DRIVING_THRESHOLD_MPS) && status == "working";
+            let status_label = if is_driving {
+                match &current_job {
+                    Some(job) if !job.is_empty() => format!("Driving to {}", job),
+                    _ => "Driving".to_string(),
+                }
+            } else if status == "break" {
+                "On break".to_string()
+            } else if status == "working" {
+                match &current_job {
+                    Some(job) if !job.is_empty() => format!("Clocked in at {}", job),
+                    _ => "Clocked in".to_string(),
+                }
+            } else {
+                "Offline".to_string()
             };
 
             // Get device last_seen
@@ -2235,6 +2337,14 @@ impl Repository {
             .await
             .unwrap_or((0,));
 
+            let unread_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM message_unread_status WHERE device_id = ? AND is_read = 0",
+            )
+            .bind(&member.device_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
             statuses.push(TeamMemberStatus {
                 device_id: member.device_id.clone(),
                 display_name: member.display_name.clone(),
@@ -2244,13 +2354,767 @@ impl Repository {
                 avatar_color: member.avatar_color.clone(),
                 status,
                 current_job,
+                current_job_id,
                 clock_in,
                 last_seen,
+                latitude,
+                longitude,
+                accuracy,
+                speed,
+                heading,
+                is_driving,
+                status_label,
+                unread_count,
                 total_scans_today: scan_count,
             });
         }
 
         Ok(statuses)
+    }
+
+    // ==================== TEAM MESSAGING ====================
+
+    pub async fn create_or_get_team_thread(&self, input: &TeamThreadInput) -> anyhow::Result<TeamMessageThread> {
+        let kind = input.kind.trim().to_lowercase();
+        match kind.as_str() {
+            "direct" => {
+                let participant_device_id = input.participant_device_id.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("participant_device_id is required for direct threads"))?;
+                self.create_or_get_direct_thread(&input.device_id, participant_device_id).await
+            }
+            "job_channel" => {
+                let job_id = input.job_id.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("job_id is required for job channel threads"))?;
+                let channel_name = input.channel_name.as_deref()
+                    .or(input.title.as_deref())
+                    .unwrap_or("General");
+                self.create_or_get_job_channel_thread(
+                    &input.device_id,
+                    job_id,
+                    input.job_name.as_deref(),
+                    channel_name,
+                ).await
+            }
+            _ => Err(anyhow::anyhow!("unsupported thread kind")),
+        }
+    }
+
+    async fn create_or_get_direct_thread(&self, device_id: &str, participant_device_id: &str) -> anyhow::Result<TeamMessageThread> {
+        if device_id == participant_device_id {
+            return Err(anyhow::anyhow!("cannot create a direct thread with yourself"));
+        }
+
+        self.ensure_team_member_exists(device_id).await?;
+        self.ensure_team_member_exists(participant_device_id).await?;
+
+        if let Some(thread) = self.find_direct_thread(device_id, participant_device_id).await? {
+            return Ok(thread);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let thread_id = uuid::Uuid::new_v4().to_string();
+        let participant = self.get_team_member_by_device(participant_device_id).await?;
+        let title = participant
+            .as_ref()
+            .map(|member| member.display_name.clone())
+            .unwrap_or_else(|| participant_device_id.to_string());
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"INSERT INTO message_threads (uuid, kind, title, created_by_device_id, created_at, updated_at)
+               VALUES (?, 'direct', ?, ?, ?, ?)"#,
+        )
+        .bind(&thread_id)
+        .bind(&title)
+        .bind(device_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        self.insert_thread_member_tx(&mut tx, &thread_id, device_id).await?;
+        self.insert_thread_member_tx(&mut tx, &thread_id, participant_device_id).await?;
+        tx.commit().await?;
+
+        self.get_message_thread(&thread_id).await?
+            .ok_or_else(|| anyhow::anyhow!("failed to create direct thread"))
+    }
+
+    async fn create_or_get_job_channel_thread(
+        &self,
+        device_id: &str,
+        job_id: &str,
+        job_name: Option<&str>,
+        channel_name: &str,
+    ) -> anyhow::Result<TeamMessageThread> {
+        self.ensure_team_member_exists(device_id).await?;
+        let normalized_channel_name = channel_name.trim();
+        let channel_name = if normalized_channel_name.is_empty() { "General" } else { normalized_channel_name };
+
+        if let Some(thread_id) = self.find_job_channel_thread_id(job_id, channel_name).await? {
+            self.ensure_thread_member(&thread_id, device_id).await?;
+            return self.get_message_thread(&thread_id).await?
+                .ok_or_else(|| anyhow::anyhow!("job channel thread not found"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let thread_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"INSERT INTO message_threads (uuid, kind, title, job_id, job_name, created_by_device_id, created_at, updated_at)
+               VALUES (?, 'job_channel', ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&thread_id)
+        .bind(channel_name)
+        .bind(job_id)
+        .bind(job_name)
+        .bind(device_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO job_channels (uuid, job_id, channel_name, thread_id, created_by_device_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&channel_id)
+        .bind(job_id)
+        .bind(channel_name)
+        .bind(&thread_id)
+        .bind(device_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        self.insert_thread_member_tx(&mut tx, &thread_id, device_id).await?;
+        tx.commit().await?;
+
+        self.get_message_thread(&thread_id).await?
+            .ok_or_else(|| anyhow::anyhow!("failed to create job channel thread"))
+    }
+
+    async fn find_direct_thread(&self, device_id: &str, participant_device_id: &str) -> anyhow::Result<Option<TeamMessageThread>> {
+        let thread = sqlx::query_as::<_, TeamMessageThread>(
+            r#"SELECT mt.* FROM message_threads mt
+               INNER JOIN message_thread_members first_member ON first_member.thread_id = mt.uuid AND first_member.device_id = ?
+               INNER JOIN message_thread_members second_member ON second_member.thread_id = mt.uuid AND second_member.device_id = ?
+               WHERE mt.kind = 'direct'
+               LIMIT 1"#,
+        )
+        .bind(device_id)
+        .bind(participant_device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(thread)
+    }
+
+    async fn find_job_channel_thread_id(&self, job_id: &str, channel_name: &str) -> anyhow::Result<Option<String>> {
+        let thread_id = sqlx::query_scalar::<_, String>(
+            "SELECT thread_id FROM job_channels WHERE job_id = ? AND channel_name = ?",
+        )
+        .bind(job_id)
+        .bind(channel_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(thread_id)
+    }
+
+    async fn get_message_thread(&self, thread_id: &str) -> anyhow::Result<Option<TeamMessageThread>> {
+        let thread = sqlx::query_as::<_, TeamMessageThread>("SELECT * FROM message_threads WHERE uuid = ?")
+            .bind(thread_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(thread)
+    }
+
+    async fn ensure_team_member_exists(&self, device_id: &str) -> anyhow::Result<()> {
+        if self.is_device_account_deleted(device_id).await? {
+            return Err(anyhow::anyhow!("Contact administration"));
+        }
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM team_members WHERE device_id = ?")
+            .bind(device_id)
+            .fetch_one(&self.pool)
+            .await?;
+
+        if count == 0 {
+            return Err(anyhow::anyhow!("team member not found"));
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_thread_member(&self, thread_id: &str, device_id: &str) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        self.insert_thread_member_tx(&mut tx, thread_id, device_id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn insert_thread_member_tx<'a>(
+        &self,
+        tx: &mut sqlx::Transaction<'a, sqlx::Sqlite>,
+        thread_id: &str,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        let display_name: Option<String> = sqlx::query_scalar(
+            "SELECT display_name FROM team_members WHERE device_id = ?",
+        )
+        .bind(device_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO message_thread_members (thread_id, device_id, display_name)
+               VALUES (?, ?, ?)
+               ON CONFLICT(thread_id, device_id) DO UPDATE SET
+                   display_name = COALESCE(excluded.display_name, message_thread_members.display_name)"#,
+        )
+        .bind(thread_id)
+        .bind(device_id)
+        .bind(display_name)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_team_threads(&self, device_id: &str, since: Option<i64>, limit: i64) -> anyhow::Result<Vec<TeamThreadSummary>> {
+        self.ensure_team_member_exists(device_id).await?;
+        self.release_waiting_active_hour_messages_for_device(device_id).await?;
+        let limit = limit.clamp(1, 100);
+        let since_ts = since.and_then(chrono::DateTime::from_timestamp_millis).map(|dt| dt.to_rfc3339());
+
+        let rows = if let Some(since_ts) = since_ts {
+            sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i32, Option<String>)>(
+                r#"SELECT
+                    mt.uuid,
+                    mt.kind,
+                    mt.title,
+                    mt.job_id,
+                    mt.job_name,
+                    latest.body,
+                    latest.sender_device_id,
+                    latest.created_at,
+                    COALESCE(unread.unread_count, 0),
+                    COALESCE(member.is_muted, 0),
+                    mt.updated_at
+                   FROM message_threads mt
+                   INNER JOIN message_thread_members member ON member.thread_id = mt.uuid AND member.device_id = ?
+                   LEFT JOIN messages latest ON latest.id = (
+                       SELECT m.id FROM messages m WHERE m.thread_id = mt.uuid ORDER BY m.created_at DESC LIMIT 1
+                   )
+                   LEFT JOIN (
+                       SELECT thread_id, COUNT(*) AS unread_count
+                       FROM message_unread_status
+                       WHERE device_id = ? AND is_read = 0
+                       GROUP BY thread_id
+                   ) unread ON unread.thread_id = mt.uuid
+                   WHERE mt.updated_at > ?
+                   ORDER BY COALESCE(mt.last_message_at, mt.updated_at) DESC
+                   LIMIT ?"#,
+            )
+            .bind(device_id)
+            .bind(device_id)
+            .bind(since_ts)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, i64, i32, Option<String>)>(
+                r#"SELECT
+                    mt.uuid,
+                    mt.kind,
+                    mt.title,
+                    mt.job_id,
+                    mt.job_name,
+                    latest.body,
+                    latest.sender_device_id,
+                    latest.created_at,
+                    COALESCE(unread.unread_count, 0),
+                    COALESCE(member.is_muted, 0),
+                    mt.updated_at
+                   FROM message_threads mt
+                   INNER JOIN message_thread_members member ON member.thread_id = mt.uuid AND member.device_id = ?
+                   LEFT JOIN messages latest ON latest.id = (
+                       SELECT m.id FROM messages m WHERE m.thread_id = mt.uuid ORDER BY m.created_at DESC LIMIT 1
+                   )
+                   LEFT JOIN (
+                       SELECT thread_id, COUNT(*) AS unread_count
+                       FROM message_unread_status
+                       WHERE device_id = ? AND is_read = 0
+                       GROUP BY thread_id
+                   ) unread ON unread.thread_id = mt.uuid
+                   ORDER BY COALESCE(mt.last_message_at, mt.updated_at) DESC
+                   LIMIT ?"#,
+            )
+            .bind(device_id)
+            .bind(device_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut summaries = Vec::new();
+        for row in rows {
+            let participant = if row.1 == "direct" {
+                self.get_direct_thread_participant(&row.0, device_id).await?
+            } else {
+                None
+            };
+
+            summaries.push(TeamThreadSummary {
+                id: row.0,
+                kind: row.1,
+                title: participant.as_ref().map(|(_, name)| name.clone())
+                    .or(row.2)
+                    .or(row.4.clone())
+                    .unwrap_or_else(|| "Team Message".to_string()),
+                job_id: row.3,
+                job_name: row.4,
+                participant_device_id: participant.as_ref().map(|(device_id, _)| device_id.clone()),
+                participant_name: participant.map(|(_, name)| name),
+                last_message: row.5,
+                last_message_sender: row.6,
+                last_message_at: row.7,
+                unread_count: row.8,
+                is_muted: row.9 != 0,
+                updated_at: row.10,
+            });
+        }
+
+        Ok(summaries)
+    }
+
+    async fn get_direct_thread_participant(&self, thread_id: &str, current_device_id: &str) -> anyhow::Result<Option<(String, String)>> {
+        let participant = sqlx::query_as::<_, (String, Option<String>)>(
+            r#"SELECT device_id, display_name
+               FROM message_thread_members
+               WHERE thread_id = ? AND device_id != ?
+               LIMIT 1"#,
+        )
+        .bind(thread_id)
+        .bind(current_device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(participant.map(|(device_id, display_name)| {
+            let name = display_name.unwrap_or_else(|| device_id.clone());
+            (device_id, name)
+        }))
+    }
+
+    pub async fn get_team_messages(&self, thread_id: &str, device_id: &str, before: Option<i64>, limit: i64) -> anyhow::Result<Vec<TeamMessage>> {
+        self.ensure_device_can_access_thread(thread_id, device_id).await?;
+        self.release_waiting_active_hour_messages_for_device(device_id).await?;
+        let limit = limit.clamp(1, 100);
+        let before_ts = before.and_then(chrono::DateTime::from_timestamp_millis).map(|dt| dt.to_rfc3339());
+
+        let messages = if let Some(before_ts) = before_ts {
+            sqlx::query_as::<_, TeamMessage>(
+                r#"SELECT * FROM messages
+                   WHERE thread_id = ? AND created_at < ?
+                   ORDER BY created_at DESC
+                   LIMIT ?"#,
+            )
+            .bind(thread_id)
+            .bind(before_ts)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, TeamMessage>(
+                r#"SELECT * FROM messages
+                   WHERE thread_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?"#,
+            )
+            .bind(thread_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(messages)
+    }
+
+    pub async fn get_team_messages_after(&self, thread_id: &str, device_id: &str, after: i64, limit: i64) -> anyhow::Result<Vec<TeamMessage>> {
+        self.ensure_device_can_access_thread(thread_id, device_id).await?;
+        self.release_waiting_active_hour_messages_for_device(device_id).await?;
+        let limit = limit.clamp(1, 100);
+        let after_ts = chrono::DateTime::from_timestamp_millis(after)
+            .map(|dt| dt.to_rfc3339())
+            .ok_or_else(|| anyhow::anyhow!("invalid after timestamp"))?;
+
+        let messages = sqlx::query_as::<_, TeamMessage>(
+            r#"SELECT * FROM messages
+               WHERE thread_id = ? AND created_at > ?
+               ORDER BY created_at ASC
+               LIMIT ?"#,
+        )
+        .bind(thread_id)
+        .bind(after_ts)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(messages)
+    }
+
+    pub async fn send_team_message(&self, thread_id: &str, input: &TeamMessageInput) -> anyhow::Result<TeamMessage> {
+        self.ensure_device_can_access_thread(thread_id, &input.device_id).await?;
+        let body = input.body.trim();
+        if body.is_empty() {
+            return Err(anyhow::anyhow!("message body cannot be empty"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let created_at = input.created_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| now.clone());
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let thread_kind: Option<String> = sqlx::query_scalar(
+            "SELECT kind FROM message_threads WHERE uuid = ?",
+        )
+        .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let recipients = self.team_message_recipients(thread_id, &input.device_id).await?;
+        let waiting_for_active_hours = thread_kind.as_deref() == Some("direct")
+            && recipients.iter().any(|recipient| !team_member_is_active_now(recipient.1, recipient.2, recipient.3, recipient.4));
+        let delivery_status = if waiting_for_active_hours { "waiting_active_hours" } else { "delivered" };
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"INSERT INTO messages (uuid, thread_id, sender_device_id, sender_name, body, created_at, delivery_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&message_id)
+        .bind(thread_id)
+        .bind(&input.device_id)
+        .bind(&input.sender_name)
+        .bind(body)
+        .bind(&created_at)
+        .bind(delivery_status)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE message_threads SET updated_at = ?, last_message_at = ? WHERE uuid = ?",
+        )
+        .bind(&now)
+        .bind(&created_at)
+        .bind(thread_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if delivery_status == "delivered" {
+            for recipient in &recipients {
+                sqlx::query(
+                    r#"INSERT INTO message_unread_status (message_id, thread_id, device_id, is_read)
+                       VALUES (?, ?, ?, 0)
+                       ON CONFLICT(message_id, device_id) DO NOTHING"#,
+                )
+                .bind(&message_id)
+                .bind(thread_id)
+                .bind(&recipient.0)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+
+        self.get_team_message(&message_id).await?
+            .ok_or_else(|| anyhow::anyhow!("failed to load sent message"))
+    }
+
+    async fn get_team_message(&self, message_id: &str) -> anyhow::Result<Option<TeamMessage>> {
+        let message = sqlx::query_as::<_, TeamMessage>("SELECT * FROM messages WHERE uuid = ?")
+            .bind(message_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(message)
+    }
+
+    async fn ensure_device_can_access_thread(&self, thread_id: &str, device_id: &str) -> anyhow::Result<()> {
+        self.ensure_team_member_exists(device_id).await?;
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_thread_members WHERE thread_id = ? AND device_id = ?",
+        )
+        .bind(thread_id)
+        .bind(device_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if count == 0 {
+            return Err(anyhow::anyhow!("thread not found for device"));
+        }
+
+        Ok(())
+    }
+
+    pub async fn mark_team_thread_read(&self, thread_id: &str, input: &TeamReadReceiptInput) -> anyhow::Result<()> {
+        self.ensure_device_can_access_thread(thread_id, &input.device_id).await?;
+        let now = Utc::now().to_rfc3339();
+
+        let mut tx = self.pool.begin().await?;
+        if let Some(read_up_to_message_id) = &input.read_up_to_message_id {
+            let created_at: Option<String> = sqlx::query_scalar(
+                "SELECT created_at FROM messages WHERE uuid = ? AND thread_id = ?",
+            )
+            .bind(read_up_to_message_id)
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(created_at) = created_at {
+                sqlx::query(
+                    r#"UPDATE message_unread_status
+                       SET is_read = 1, read_at = ?
+                       WHERE thread_id = ? AND device_id = ? AND is_read = 0
+                       AND message_id IN (
+                           SELECT uuid FROM messages WHERE thread_id = ? AND created_at <= ?
+                       )"#,
+                )
+                .bind(&now)
+                .bind(thread_id)
+                .bind(&input.device_id)
+                .bind(thread_id)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else {
+            sqlx::query(
+                r#"UPDATE message_unread_status
+                   SET is_read = 1, read_at = ?
+                   WHERE thread_id = ? AND device_id = ? AND is_read = 0"#,
+            )
+            .bind(&now)
+            .bind(thread_id)
+            .bind(&input.device_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"UPDATE message_thread_members
+               SET last_read_message_id = ?, last_read_at = ?
+               WHERE thread_id = ? AND device_id = ?"#,
+        )
+        .bind(&input.read_up_to_message_id)
+        .bind(&now)
+        .bind(thread_id)
+        .bind(&input.device_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_team_unread_summary(&self, device_id: &str) -> anyhow::Result<TeamUnreadSummary> {
+        self.ensure_team_member_exists(device_id).await?;
+        self.release_waiting_active_hour_messages_for_device(device_id).await?;
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT thread_id, COUNT(*)
+               FROM message_unread_status
+               WHERE device_id = ? AND is_read = 0
+               GROUP BY thread_id"#,
+        )
+        .bind(device_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let threads: Vec<TeamUnreadThreadCount> = rows.into_iter()
+            .map(|(thread_id, unread_count)| TeamUnreadThreadCount { thread_id, unread_count })
+            .collect();
+        let total_unread = threads.iter().map(|thread| thread.unread_count).sum();
+
+        Ok(TeamUnreadSummary { total_unread, threads })
+    }
+
+    async fn team_message_recipients(&self, thread_id: &str, sender_device_id: &str) -> anyhow::Result<Vec<(String, i32, i32, i32, i32)>> {
+        let recipients = sqlx::query_as::<_, (String, i32, i32, i32, i32)>(
+            r#"SELECT
+                   mtm.device_id,
+                   COALESCE(tm.active_hours_enabled, 1),
+                   COALESCE(tm.active_hours_start_minutes, 300),
+                   COALESCE(tm.active_hours_end_minutes, 1020),
+                   COALESCE(tm.active_hours_utc_offset_minutes, 0)
+               FROM message_thread_members mtm
+               LEFT JOIN team_members tm ON tm.device_id = mtm.device_id
+               WHERE mtm.thread_id = ? AND mtm.device_id != ?"#,
+        )
+        .bind(thread_id)
+        .bind(sender_device_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(recipients)
+    }
+
+    async fn team_member_active_hours(&self, device_id: &str) -> anyhow::Result<Option<(i32, i32, i32, i32)>> {
+        let active_hours = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            r#"SELECT
+                   COALESCE(active_hours_enabled, 1),
+                   COALESCE(active_hours_start_minutes, 300),
+                   COALESCE(active_hours_end_minutes, 1020),
+                   COALESCE(active_hours_utc_offset_minutes, 0)
+               FROM team_members
+               WHERE device_id = ?"#,
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(active_hours)
+    }
+
+    async fn release_waiting_active_hour_messages_for_device(&self, device_id: &str) -> anyhow::Result<u64> {
+        let Some(active_hours) = self.team_member_active_hours(device_id).await? else {
+            return Ok(0);
+        };
+        if !team_member_is_active_now(active_hours.0, active_hours.1, active_hours.2, active_hours.3) {
+            return Ok(0);
+        }
+
+        let messages = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT m.uuid, m.thread_id
+               FROM messages m
+               INNER JOIN message_threads mt ON mt.uuid = m.thread_id
+               INNER JOIN message_thread_members mtm ON mtm.thread_id = m.thread_id AND mtm.device_id = ?
+               WHERE mt.kind = 'direct'
+                 AND m.sender_device_id != ?
+                 AND m.delivery_status = 'waiting_active_hours'"#,
+        )
+        .bind(device_id)
+        .bind(device_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if messages.is_empty() {
+            return Ok(0);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        for (message_id, thread_id) in &messages {
+            sqlx::query("UPDATE messages SET delivery_status = 'delivered', updated_at = ? WHERE uuid = ?")
+                .bind(&now)
+                .bind(message_id)
+                .execute(&mut *tx)
+                .await?;
+
+            sqlx::query(
+                r#"INSERT INTO message_unread_status (message_id, thread_id, device_id, is_read)
+                   VALUES (?, ?, ?, 0)
+                   ON CONFLICT(message_id, device_id) DO NOTHING"#,
+            )
+            .bind(message_id)
+            .bind(thread_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        Ok(messages.len() as u64)
+    }
+
+    pub async fn upsert_push_token(&self, input: &PushTokenInput) -> anyhow::Result<()> {
+        self.ensure_team_member_exists(&input.device_id).await?;
+        let now = Utc::now().to_rfc3339();
+        let platform = input.platform.as_deref().unwrap_or("apns");
+        let environment = input.environment.as_deref().unwrap_or("production");
+
+        sqlx::query(
+            r#"INSERT INTO push_tokens (device_id, token, platform, environment, bundle_id, updated_at, disabled_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)
+               ON CONFLICT(token) DO UPDATE SET
+                   device_id = excluded.device_id,
+                   platform = excluded.platform,
+                   environment = excluded.environment,
+                   bundle_id = excluded.bundle_id,
+                   updated_at = excluded.updated_at,
+                   disabled_at = NULL"#,
+        )
+        .bind(&input.device_id)
+        .bind(&input.token)
+        .bind(platform)
+        .bind(environment)
+        .bind(&input.bundle_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_push_targets_for_thread(&self, thread_id: &str, sender_device_id: &str) -> anyhow::Result<Vec<PushDeliveryTarget>> {
+        Ok(sqlx::query_as::<_, PushDeliveryTarget>(
+            r#"SELECT
+                   token.id AS token_id,
+                   token.device_id,
+                   token.token,
+                   token.platform,
+                   token.environment,
+                   token.bundle_id
+               FROM message_thread_members member
+               INNER JOIN push_tokens token ON token.device_id = member.device_id
+               WHERE member.thread_id = ?
+                 AND member.device_id != ?
+                 AND COALESCE(member.is_muted, 0) = 0
+                 AND token.disabled_at IS NULL
+                 AND COALESCE(token.platform, 'apns') = 'apns'"#,
+        )
+        .bind(thread_id)
+        .bind(sender_device_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn log_push_delivery(
+        &self,
+        message_id: Option<&str>,
+        thread_id: Option<&str>,
+        device_id: &str,
+        token_id: Option<i64>,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO push_delivery_log (message_id, thread_id, device_id, token_id, status, error_message)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(message_id)
+        .bind(thread_id)
+        .bind(device_id)
+        .bind(token_id)
+        .bind(status)
+        .bind(error_message)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn disable_push_token(&self, token_id: i64) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE push_tokens SET disabled_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     // ==================== TIMESHEETS ====================
@@ -2781,4 +3645,24 @@ fn round_time(dt: chrono::DateTime<Utc>, interval_minutes: i32) -> chrono::DateT
     let ts = dt.timestamp();
     let rounded = ((ts + secs / 2) / secs) * secs;
     chrono::DateTime::from_timestamp(rounded, 0).unwrap_or(dt)
+}
+
+fn team_member_is_active_now(enabled: i32, start_minutes: i32, end_minutes: i32, utc_offset_minutes: i32) -> bool {
+    if enabled == 0 {
+        return true;
+    }
+
+    let start = start_minutes.clamp(0, 1439);
+    let end = end_minutes.clamp(0, 1439);
+    let offset_seconds = i64::from(utc_offset_minutes.clamp(-1440, 1440)) * 60;
+    let local_seconds = (Utc::now().timestamp() + offset_seconds).rem_euclid(24 * 60 * 60);
+    let current_minutes = (local_seconds / 60) as i32;
+
+    if start == end {
+        true
+    } else if start < end {
+        current_minutes >= start && current_minutes < end
+    } else {
+        current_minutes >= start || current_minutes < end
+    }
 }

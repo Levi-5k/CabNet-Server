@@ -1,7 +1,10 @@
 use eframe::egui;
 use std::process::Command;
 use crate::config::get_data_dir;
-use crate::services::{SharedTunnelManager, TunnelStatus};
+use crate::services::{
+    cloudflared_origin_cert_path, cloudflared_tunnel_credentials_paths, SharedTunnelManager,
+    TunnelStatus,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Perform a database backup — copies codebar.db to backups/codebar_YYYY-MM-DD.db
@@ -254,6 +257,20 @@ pub struct SettingsTab {
 }
 
 impl SettingsTab {
+    pub fn open_cloudflare_setup(&mut self) {
+        self.show_cloudflare_setup = true;
+        self.cloudflare_step = 0;
+        if self.cloudflare_tunnel_name.is_empty() {
+            self.cloudflare_tunnel_name = "cabnet".to_string();
+        }
+        if self.cloudflare_domain.is_empty() {
+            self.cloudflare_domain = "cabnetx.com".to_string();
+        }
+        if self.cloudflare_subdomain.is_empty() {
+            self.cloudflare_subdomain = "scans".to_string();
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, server_addr: &str, tunnel_manager: &SharedTunnelManager, state: &crate::api::routes::SharedState, runtime: &tokio::runtime::Handle) -> bool {
         self.needs_refresh = false;
         ui.heading("Settings");
@@ -343,13 +360,7 @@ impl SettingsTab {
                             .rounding(egui::Rounding::same(6.0));
                             
                             if ui.add(btn).clicked() {
-                                self.show_cloudflare_setup = true;
-                                if self.cloudflare_tunnel_name.is_empty() {
-                                    self.cloudflare_tunnel_name = "cabnet".to_string();
-                                }
-                                if self.cloudflare_subdomain.is_empty() {
-                                    self.cloudflare_subdomain = "scans".to_string();
-                                }
+                                self.open_cloudflare_setup();
                             }
                         });
                     });
@@ -722,7 +733,7 @@ impl SettingsTab {
         ui.label(egui::RichText::new("Run this command to install:").color(egui::Color32::from_rgb(148, 163, 184)));
         ui.add_space(8.0);
         
-        let cmd = "winget install Cloudflare.cloudflared";
+        let cmd = install_cloudflared_command();
         
         // Command box with inline run
         egui::Frame::none()
@@ -748,12 +759,9 @@ impl SettingsTab {
                         .rounding(egui::Rounding::same(4.0));
                         
                         if ui.add_enabled(!self.step1_running, run_btn).clicked() {
-                            self.step1_running = true;
                             self.step1_status.output.clear();
                             
-                            // Run winget install
-                            match Command::new("powershell")
-                                .args(["-Command", "winget install Cloudflare.cloudflared --accept-package-agreements --accept-source-agreements"])
+                            match run_shell_command(install_cloudflared_command())
                                 .output()
                             {
                                 Ok(output) => {
@@ -776,10 +784,9 @@ impl SettingsTab {
                                 }
                                 Err(e) => {
                                     self.step1_status.success = Some(false);
-                                    self.step1_status.output = format!("Failed to run winget: {}", e);
+                                    self.step1_status.output = format!("Failed to run install command: {}", e);
                                 }
                             }
-                            self.step1_running = false;
                         }
                         
                         ui.add_space(8.0);
@@ -832,6 +839,14 @@ impl SettingsTab {
     }
 
     fn step_login_cloudflare(&mut self, ui: &mut egui::Ui) {
+        if let Some(cert_path) = cloudflared_origin_cert_path() {
+            self.cloudflare_logged_in = true;
+            if self.step2_status.output.is_empty() {
+                self.step2_status.success = Some(true);
+                self.step2_status.output = format!("✓ Cloudflare origin certificate found at {}", cert_path.display());
+            }
+        }
+
         ui.label(egui::RichText::new("Step 2: Login to Cloudflare").size(16.0).strong());
         ui.add_space(12.0);
         
@@ -867,28 +882,26 @@ impl SettingsTab {
                         .rounding(egui::Rounding::same(4.0));
                         
                         if ui.add_enabled(!self.step2_running, run_btn).clicked() {
-                            self.step2_running = true;
-                            self.step2_status.output = "Browser opened - complete login in browser...".to_string();
-                            self.step2_status.success = None;
+                            self.step2_status.output.clear();
                             
-                            // Run cloudflared login - this opens a browser and waits for auth
-                            let full_cmd = "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); cloudflared tunnel login";
-                            
-                            match Command::new("powershell")
-                                .args(["-Command", full_cmd])
+                            match run_shell_command("cloudflared tunnel login")
                                 .output()
                             {
                                 Ok(output) => {
                                     let stdout = String::from_utf8_lossy(&output.stdout);
                                     let stderr = String::from_utf8_lossy(&output.stderr);
                                     let combined = format!("{}{}", stdout, stderr);
-                                    
-                                    if combined.contains("You have successfully logged in") || 
-                                       combined.contains("certificate has been") ||
-                                       combined.contains("cert.pem") {
+
+                                    let cert_path = cloudflared_origin_cert_path();
+                                    if combined.contains("You have successfully logged in") ||
+                                        combined.contains("certificate has been") ||
+                                        combined.contains("cert.pem") ||
+                                        cert_path.is_some() {
                                         self.cloudflare_logged_in = true;
                                         self.step2_status.success = Some(true);
-                                        self.step2_status.output = "✓ Successfully logged in to Cloudflare!".to_string();
+                                        self.step2_status.output = cert_path
+                                            .map(|path| format!("✓ Successfully logged in. Origin certificate: {}", path.display()))
+                                            .unwrap_or_else(|| "✓ Successfully logged in to Cloudflare!".to_string());
                                     } else if combined.contains("already") {
                                         self.cloudflare_logged_in = true;
                                         self.step2_status.success = Some(true);
@@ -963,6 +976,10 @@ impl SettingsTab {
         
         ui.label("Create a named tunnel that will route traffic to CabNet.");
         ui.add_space(12.0);
+
+        if !self.require_cloudflare_login(ui) {
+            return;
+        }
         
         ui.horizontal(|ui| {
             ui.label("Tunnel name:");
@@ -1007,17 +1024,11 @@ impl SettingsTab {
                         .rounding(egui::Rounding::same(4.0));
                         
                         if ui.add_enabled(!self.creating_tunnel, run_btn).clicked() {
-                            self.creating_tunnel = true;
                             self.cmd_status.output.clear();
                             
                             // Run command and capture output
-                            let full_cmd = format!(
-                                "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); cloudflared tunnel create {}",
-                                tunnel_name
-                            );
-                            
-                            match Command::new("powershell")
-                                .args(["-Command", &full_cmd])
+                            let full_cmd = format!("cloudflared tunnel create {}", tunnel_name);
+                            match run_shell_command(&full_cmd)
                                 .output()
                             {
                                 Ok(output) => {
@@ -1033,9 +1044,9 @@ impl SettingsTab {
                                         self.cmd_status.success = Some(true);
                                         self.cmd_status.output = format!("✓ Tunnel created! ID: {}", self.cloudflare_tunnel_id);
                                     } else if combined.contains("already exists") {
-                                        // Tunnel already exists - try to get the ID
-                                        self.cmd_status.success = Some(false);
-                                        self.cmd_status.output = "Tunnel already exists. Use a different name or delete the existing tunnel.".to_string();
+                                        self.cloudflare_tunnel_created = true;
+                                        self.cmd_status.success = Some(true);
+                                        self.cmd_status.output = "✓ Tunnel already exists in Cloudflare. CabNet will use the existing tunnel.".to_string();
                                     } else {
                                         self.cmd_status.success = Some(false);
                                         self.cmd_status.output = format!("Failed to create tunnel: {}", combined.trim());
@@ -1046,7 +1057,6 @@ impl SettingsTab {
                                     self.cmd_status.output = format!("Failed to run command: {}", e);
                                 }
                             }
-                            self.creating_tunnel = false;
                         }
                         ui.add_space(8.0);
                         
@@ -1119,6 +1129,98 @@ impl SettingsTab {
         uuid_pattern.find(output).map(|m| m.as_str().to_string())
     }
 
+    fn require_cloudflare_login(&mut self, ui: &mut egui::Ui) -> bool {
+        if let Some(cert_path) = cloudflared_origin_cert_path() {
+            self.cloudflare_logged_in = true;
+            ui.label(
+                egui::RichText::new(format!("Using Cloudflare origin certificate: {}", cert_path.display()))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184))
+            );
+            ui.add_space(8.0);
+            return true;
+        }
+
+        self.cloudflare_logged_in = false;
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(239, 68, 68).linear_multiply(0.2))
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(12.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("⚠").size(16.0).color(egui::Color32::from_rgb(239, 68, 68)));
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Cloudflare login is required before creating tunnels or DNS routes.")
+                                .color(egui::Color32::from_rgb(239, 68, 68))
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.label("Run Step 2 first so cloudflared can create ~/.cloudflared/cert.pem.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Go to Login Step").clicked() {
+                            self.cloudflare_step = 1;
+                            self.step2_status.success = None;
+                            self.step2_status.output = "Run cloudflared tunnel login, then select cabnetx.com in the browser.".to_string();
+                        }
+                        if ui.small_button("📋 Copy Login Command").clicked() {
+                            ui.ctx().copy_text("cloudflared tunnel login".to_string());
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+        false
+    }
+
+    fn require_cloudflare_tunnel_credentials(&mut self, ui: &mut egui::Ui, tunnel_name: &str) -> bool {
+        let credentials = cloudflared_tunnel_credentials_paths();
+        if !credentials.is_empty() {
+            self.cloudflare_tunnel_created = true;
+            ui.label(
+                egui::RichText::new(format!("Using tunnel credentials: {}", credentials[0].display()))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184))
+            );
+            ui.add_space(8.0);
+            return true;
+        }
+
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(251, 191, 36).linear_multiply(0.2))
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(12.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("⚠").size(16.0).color(egui::Color32::from_rgb(251, 191, 36)));
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("No local tunnel credentials JSON was found on this Mac.")
+                                .color(egui::Color32::from_rgb(251, 191, 36))
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.label("If the tunnel already exists in Cloudflare, CabNet can fetch a run token when it starts the tunnel.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Go to Create Tunnel Step").clicked() {
+                            self.cloudflare_step = 2;
+                            self.cmd_status.success = None;
+                            self.cmd_status.output = format!("Run cloudflared tunnel create {} before starting the tunnel.", tunnel_name);
+                        }
+                        if ui.small_button("📋 Copy Create Command").clicked() {
+                            ui.ctx().copy_text(format!("cloudflared tunnel create {}", tunnel_name));
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+        true
+    }
+
     fn step_configure_domain(&mut self, ui: &mut egui::Ui, _port: &str) {
         ui.label(egui::RichText::new("Step 4: Configure Your Domain").size(16.0).strong());
         ui.add_space(12.0);
@@ -1147,10 +1249,14 @@ impl SettingsTab {
         
         // Check if domain is filled in
         let domain_valid = !self.cloudflare_domain.is_empty() && !self.cloudflare_domain.contains("example");
-        let subdomain = if self.cloudflare_subdomain.is_empty() { "scans" } else { &self.cloudflare_subdomain };
-        let tunnel_name = if self.cloudflare_tunnel_name.is_empty() { "cabnet" } else { &self.cloudflare_tunnel_name };
         
         if domain_valid {
+            if !self.require_cloudflare_login(ui) {
+                return;
+            }
+
+            let subdomain = if self.cloudflare_subdomain.is_empty() { "scans".to_string() } else { self.cloudflare_subdomain.clone() };
+            let tunnel_name = if self.cloudflare_tunnel_name.is_empty() { "cabnet".to_string() } else { self.cloudflare_tunnel_name.clone() };
             let main_domain = &self.cloudflare_domain;
             let full_subdomain = format!("{}.{}", subdomain, self.cloudflare_domain);
             
@@ -1214,20 +1320,14 @@ impl SettingsTab {
                 .rounding(egui::Rounding::same(4.0));
                 
                 if ui.add_enabled(!self.step4_running, run_btn).clicked() {
-                    self.step4_running = true;
                     self.step4_status.output.clear();
                     
                     let mut results = Vec::new();
                     let mut all_success = true;
                     
                     // Run command for main domain
-                    let full_cmd1 = format!(
-                        "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); cloudflared tunnel route dns {} {}",
-                        tunnel_name, main_domain
-                    );
-                    
-                    match Command::new("powershell")
-                        .args(["-Command", &full_cmd1])
+                    let full_cmd1 = format!("cloudflared tunnel route dns {} {}", tunnel_name, main_domain);
+                    match run_shell_command(&full_cmd1)
                         .output()
                     {
                         Ok(output) => {
@@ -1256,13 +1356,8 @@ impl SettingsTab {
                     }
                     
                     // Run command for subdomain
-                    let full_cmd2 = format!(
-                        "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); cloudflared tunnel route dns {} {}",
-                        tunnel_name, full_subdomain
-                    );
-                    
-                    match Command::new("powershell")
-                        .args(["-Command", &full_cmd2])
+                    let full_cmd2 = format!("cloudflared tunnel route dns {} {}", tunnel_name, full_subdomain);
+                    match run_shell_command(&full_cmd2)
                         .output()
                     {
                         Ok(output) => {
@@ -1293,7 +1388,6 @@ impl SettingsTab {
                     self.cloudflare_dns_configured = all_success;
                     self.step4_status.success = Some(all_success);
                     self.step4_status.output = results.join("\n");
-                    self.step4_running = false;
                 }
                 
                 ui.add_space(8.0);
@@ -1364,8 +1458,8 @@ impl SettingsTab {
         ui.label(egui::RichText::new("Step 5: Start the Tunnel").size(16.0).strong());
         ui.add_space(12.0);
         
-        let tunnel_name = if self.cloudflare_tunnel_name.is_empty() { "cabnet" } else { &self.cloudflare_tunnel_name };
-        let subdomain = if self.cloudflare_subdomain.is_empty() { "cabnet" } else { &self.cloudflare_subdomain };
+        let tunnel_name = if self.cloudflare_tunnel_name.is_empty() { "cabnet".to_string() } else { self.cloudflare_tunnel_name.clone() };
+        let subdomain = if self.cloudflare_subdomain.is_empty() { "cabnet".to_string() } else { self.cloudflare_subdomain.clone() };
         let full_domain = if self.cloudflare_domain.is_empty() {
             format!("{}.yourdomain.com", subdomain)
         } else {
@@ -1434,6 +1528,14 @@ impl SettingsTab {
             });
         } else {
             // Show start button
+            if !self.require_cloudflare_login(ui) {
+                return;
+            }
+
+            if !self.require_cloudflare_tunnel_credentials(ui, &tunnel_name) {
+                return;
+            }
+
             ui.label("Click the button below to start the tunnel in the background.");
             ui.label(
                 egui::RichText::new("The tunnel will automatically start when CabNet launches.")
@@ -1503,5 +1605,27 @@ impl SettingsTab {
                     });
                 });
         }
+    }
+}
+
+fn install_cloudflared_command() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "brew install cloudflared"
+    } else if cfg!(windows) {
+        "winget install Cloudflare.cloudflared --accept-package-agreements --accept-source-agreements"
+    } else {
+        "cloudflared --version || curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared"
+    }
+}
+
+fn run_shell_command(command: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-Command", command]);
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-lc", command]);
+        cmd
     }
 }

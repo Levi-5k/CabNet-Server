@@ -1,4 +1,5 @@
 use crate::db::repository::Repository;
+use crate::services::PushNotificationService;
 use axum::{
     routing::{delete, get, post, put},
     Router,
@@ -17,6 +18,7 @@ use super::web;
 #[derive(Clone)]
 pub struct AppState {
     pub repo: Repository,
+    pub push_notifications: PushNotificationService,
     pub start_time: std::time::Instant,
 }
 
@@ -109,6 +111,13 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/team/status", get(handlers::get_team_status))
         .route("/api/team/members", post(handlers::upsert_team_member))
         .route("/api/team/members/:device_id", delete(handlers::delete_team_member))
+        .route("/api/team/threads", get(handlers::get_team_threads))
+        .route("/api/team/threads", post(handlers::create_team_thread))
+        .route("/api/team/threads/:thread_id/messages", get(handlers::get_team_messages))
+        .route("/api/team/threads/:thread_id/messages", post(handlers::send_team_message))
+        .route("/api/team/threads/:thread_id/read", post(handlers::mark_team_thread_read))
+        .route("/api/team/unread-count", get(handlers::get_team_unread_count))
+        .route("/api/devices/push-tokens", post(handlers::register_push_token))
         // Timesheets
         .route("/api/timesheets", get(handlers::get_timesheets))
         // Job Files (PDF uploads + search)

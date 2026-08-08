@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use crate::config::get_data_dir;
 
+const ACCOUNT_DELETED_MESSAGE: &str = "Contact administration";
+
 // ==================== RESPONSE TYPES ====================
 
 #[derive(Serialize)]
@@ -59,6 +61,25 @@ impl ApiResponse<()> {
             data: None,
         }
     }
+}
+
+async fn ensure_account_active(
+    repo: &crate::db::repository::Repository,
+    device_id: &str,
+) -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
+    if repo.is_device_account_deleted(device_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Database error: {}", e))),
+        )
+    })? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(ACCOUNT_DELETED_MESSAGE)),
+        ));
+    }
+
+    Ok(())
 }
 
 // ==================== REQUEST TYPES ====================
@@ -355,6 +376,14 @@ pub struct ConnectRequest {
     pub user_name: Option<String>,
     #[serde(default)]
     pub phone_number: Option<String>,
+    #[serde(default)]
+    pub active_hours_enabled: Option<bool>,
+    #[serde(default)]
+    pub active_hours_start_minutes: Option<i32>,
+    #[serde(default)]
+    pub active_hours_end_minutes: Option<i32>,
+    #[serde(default)]
+    pub active_hours_utc_offset_minutes: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -421,6 +450,7 @@ pub async fn sync_scans(
     Json(request): Json<SyncScansRequest>,
 ) -> Result<Json<ApiResponse<SyncScansResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let mut synced_ids = Vec::new();
 
     // Update device heartbeat with enhanced status tracking
@@ -490,6 +520,7 @@ pub async fn verify_scans(
     Json(request): Json<VerifyScansRequest>,
 ) -> Result<Json<ApiResponse<VerifyScansResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
 
     // Update device last seen
     let _ = state.repo.update_device_last_seen(&request.device_id).await;
@@ -629,6 +660,7 @@ pub async fn sync_jobs(
     Json(request): Json<SyncJobsRequest>,
 ) -> Result<Json<ApiResponse<SyncJobsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let mut synced_job_ids = Vec::new();
 
     // Update device last seen
@@ -875,6 +907,7 @@ pub async fn register_device(
 
     let state = state.read().await;
     let device_id = request.device_id.clone();
+    ensure_account_active(&state.repo, &device_id).await?;
     let ip_address = addr.ip().to_string();
 
     // Extract user agent from headers
@@ -988,6 +1021,7 @@ pub async fn device_heartbeat(
     Json(request): Json<HeartbeatRequest>,
 ) -> Result<Json<ApiResponse<HeartbeatResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let ip_address = addr.ip().to_string();
 
     // Check if device is blocked
@@ -1038,6 +1072,7 @@ pub async fn device_enhanced_heartbeat(
     Json(request): Json<EnhancedHeartbeatRequest>,
 ) -> Result<Json<ApiResponse<EnhancedHeartbeatResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let ip_address = addr.ip().to_string();
 
     // Check if device is blocked
@@ -1118,6 +1153,7 @@ pub async fn device_connect(
 ) -> Result<Json<ApiResponse<ConnectResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
     let device_id = request.device_id.clone();
+    ensure_account_active(&state.repo, &device_id).await?;
 
     // Create DeviceInput from ConnectRequest
     let device_input = DeviceInput {
@@ -1149,6 +1185,10 @@ pub async fn device_connect(
                 role: None,
                 is_admin: None,
                 avatar_color: None,
+                active_hours_enabled: request.active_hours_enabled,
+                active_hours_start_minutes: request.active_hours_start_minutes,
+                active_hours_end_minutes: request.active_hours_end_minutes,
+                active_hours_utc_offset_minutes: request.active_hours_utc_offset_minutes,
             };
             if let Err(e) = state.repo.upsert_team_member(&team_input).await {
                 tracing::warn!("Failed to upsert team member: {}", e);
@@ -1750,7 +1790,7 @@ pub async fn approve_device(
     State(state): State<SharedState>,
     Json(request): Json<DeviceApprovalRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     // Check if device exists
     let device = state.repo.get_device(&request.device_id).await
@@ -1819,7 +1859,7 @@ pub async fn block_device(
         ));
     }
 
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     state.repo.block_device(&request.device_id, request.minutes).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
@@ -1832,7 +1872,7 @@ pub async fn unblock_device(
     State(state): State<SharedState>,
     Json(request): Json<UnblockDeviceRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     state.repo.unblock_device(&request.device_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
@@ -1857,7 +1897,7 @@ pub async fn update_security_settings(
     State(state): State<SharedState>,
     Json(settings): Json<SecuritySettings>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     state.repo.update_security_settings(&settings).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
@@ -1923,6 +1963,7 @@ pub async fn sync_time_entries(
     Json(request): Json<SyncTimeEntriesRequest>,
 ) -> Result<Json<ApiResponse<SyncTimeEntriesResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let mut synced_ids = Vec::new();
 
     for entry in &request.entries {
@@ -2047,6 +2088,7 @@ pub async fn sync_reports(
     Json(request): Json<SyncReportsRequest>,
 ) -> Result<Json<ApiResponse<SyncReportsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let mut synced_ids = Vec::new();
 
     for report in &request.reports {
@@ -2165,7 +2207,15 @@ pub async fn sync_location_pings(
     State(state): State<SharedState>,
     Json(request): Json<SyncLocationPingsRequest>,
 ) -> Result<Json<ApiResponse<SyncLocationPingsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if request.pings.len() > 500 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::error("Location ping batches are limited to 500 pings")),
+        ));
+    }
+
     let state = state.read().await;
+    ensure_account_active(&state.repo, &request.device_id).await?;
     let mut synced_ids = Vec::new();
 
     for ping in &request.pings {
@@ -2185,7 +2235,7 @@ pub async fn get_location_pings(
     Query(query): Query<GetLocationPingsQuery>,
 ) -> Result<Json<ApiResponse<GetLocationPingsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let state = state.read().await;
-    let limit = query.limit.unwrap_or(5000);
+    let limit = query.limit.unwrap_or(1000).clamp(1, 1000);
     let active_only = query.active_only.unwrap_or(false);
 
     let pings = state
@@ -2255,6 +2305,8 @@ pub async fn upsert_team_member(
     let state = state.read().await;
     state.repo.upsert_team_member(&input).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
+    state.repo.clear_device_account_deleted(&input.device_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e.to_string()))))?;
     Ok(Json(ApiResponse::success_with_message(
         serde_json::json!({"device_id": input.device_id}),
         "Team member saved",
@@ -2279,6 +2331,171 @@ pub async fn delete_team_member(
     } else {
         Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Team member not found"))))
     }
+}
+
+// ==================== TEAM MESSAGING ====================
+
+#[derive(Deserialize)]
+pub struct GetTeamThreadsQuery {
+    pub device_id: String,
+    pub since: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TeamThreadsResponse {
+    pub threads: Vec<TeamThreadSummary>,
+    pub total_unread: i64,
+}
+
+#[derive(Serialize)]
+pub struct TeamThreadResponse {
+    pub thread: TeamMessageThread,
+}
+
+#[derive(Deserialize)]
+pub struct GetTeamMessagesQuery {
+    pub device_id: String,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TeamMessagesResponse {
+    pub messages: Vec<TeamMessage>,
+    pub has_more: bool,
+}
+
+#[derive(Serialize)]
+pub struct TeamMessageResponse {
+    pub message: TeamMessage,
+}
+
+#[derive(Serialize)]
+pub struct TeamUnreadResponse {
+    pub unread: TeamUnreadSummary,
+}
+
+pub async fn get_team_threads(
+    State(state): State<SharedState>,
+    Query(query): Query<GetTeamThreadsQuery>,
+) -> Result<Json<ApiResponse<TeamThreadsResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let threads = state.repo.get_team_threads(&query.device_id, query.since, query.limit.unwrap_or(50)).await
+        .map_err(api_error_from_anyhow)?;
+    let unread = state.repo.get_team_unread_summary(&query.device_id).await
+        .map_err(api_error_from_anyhow)?;
+
+    Ok(Json(ApiResponse::success(TeamThreadsResponse {
+        threads,
+        total_unread: unread.total_unread,
+    })))
+}
+
+pub async fn create_team_thread(
+    State(state): State<SharedState>,
+    Json(input): Json<TeamThreadInput>,
+) -> Result<Json<ApiResponse<TeamThreadResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let thread = state.repo.create_or_get_team_thread(&input).await
+        .map_err(api_error_from_anyhow)?;
+    Ok(Json(ApiResponse::success(TeamThreadResponse { thread })))
+}
+
+pub async fn get_team_messages(
+    State(state): State<SharedState>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<GetTeamMessagesQuery>,
+) -> Result<Json<ApiResponse<TeamMessagesResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let requested_limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let messages = if let Some(after) = query.after {
+        state.repo.get_team_messages_after(&thread_id, &query.device_id, after, requested_limit + 1).await
+    } else {
+        state.repo.get_team_messages(&thread_id, &query.device_id, query.before, requested_limit + 1).await
+    }
+    .map_err(api_error_from_anyhow)?;
+    let has_more = messages.len() > requested_limit as usize;
+    let messages = messages.into_iter().take(requested_limit as usize).collect();
+
+    Ok(Json(ApiResponse::success(TeamMessagesResponse { messages, has_more })))
+}
+
+pub async fn send_team_message(
+    State(state): State<SharedState>,
+    Path(thread_id): Path<String>,
+    Json(input): Json<TeamMessageInput>,
+) -> Result<Json<ApiResponse<TeamMessageResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (repo, push_notifications) = {
+        let state = state.read().await;
+        (state.repo.clone(), state.push_notifications.clone())
+    };
+
+    let message = repo.send_team_message(&thread_id, &input).await
+        .map_err(api_error_from_anyhow)?;
+
+    if message.delivery_status == "delivered" {
+        let push_repo = repo.clone();
+        let push_thread_id = thread_id.clone();
+        let push_message = message.clone();
+        tokio::spawn(async move {
+            if let Err(error) = push_notifications
+                .deliver_team_message(&push_repo, &push_thread_id, &push_message)
+                .await
+            {
+                tracing::warn!(%error, "Team message push delivery failed");
+            }
+        });
+    }
+
+    Ok(Json(ApiResponse::success(TeamMessageResponse { message })))
+}
+
+pub async fn mark_team_thread_read(
+    State(state): State<SharedState>,
+    Path(thread_id): Path<String>,
+    Json(input): Json<TeamReadReceiptInput>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    state.repo.mark_team_thread_read(&thread_id, &input).await
+        .map_err(api_error_from_anyhow)?;
+    Ok(Json(ApiResponse::success_with_message(serde_json::json!({}), "Thread marked read")))
+}
+
+pub async fn get_team_unread_count(
+    State(state): State<SharedState>,
+    Query(query): Query<GetTeamThreadsQuery>,
+) -> Result<Json<ApiResponse<TeamUnreadResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    let unread = state.repo.get_team_unread_summary(&query.device_id).await
+        .map_err(api_error_from_anyhow)?;
+    Ok(Json(ApiResponse::success(TeamUnreadResponse { unread })))
+}
+
+pub async fn register_push_token(
+    State(state): State<SharedState>,
+    Json(input): Json<PushTokenInput>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let state = state.read().await;
+    state.repo.upsert_push_token(&input).await
+        .map_err(api_error_from_anyhow)?;
+    Ok(Json(ApiResponse::success_with_message(serde_json::json!({}), "Push token registered")))
+}
+
+fn api_error_from_anyhow(error: anyhow::Error) -> (StatusCode, Json<ApiResponse<()>>) {
+    let message = error.to_string();
+    let status = if message == ACCOUNT_DELETED_MESSAGE {
+        StatusCode::FORBIDDEN
+    } else if message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if message.contains("required") || message.contains("unsupported") || message.contains("empty") || message.contains("yourself") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    (status, Json(ApiResponse::error(message)))
 }
 
 // ==================== TIMESHEETS ====================

@@ -61,7 +61,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                host: "0.0.0.0".to_string(),
+                host: "127.0.0.1".to_string(),
                 port: 8080,
             },
             database: DatabaseConfig {
@@ -75,7 +75,7 @@ impl Default for Config {
 impl Config {
     /// Load configuration from environment variables
     pub fn from_env() -> anyhow::Result<Self> {
-        dotenvy::dotenv().ok();
+        load_dotenv_files();
 
         let mut config = Config::default();
 
@@ -131,5 +131,23 @@ impl Config {
     /// Get the database URL for SQLx
     pub fn database_url(&self) -> String {
         format!("sqlite:{}", self.database.path.display())
+    }
+}
+
+fn load_dotenv_files() {
+    let _ = dotenvy::dotenv();
+
+    let manifest_env = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if manifest_env.exists() {
+        let _ = dotenvy::from_path(manifest_env);
+    }
+
+    if let Ok(executable_path) = std::env::current_exe() {
+        if let Some(executable_dir) = executable_path.parent() {
+            let executable_env = executable_dir.join(".env");
+            if executable_env.exists() {
+                let _ = dotenvy::from_path(executable_env);
+            }
+        }
     }
 }

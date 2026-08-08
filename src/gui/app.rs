@@ -119,14 +119,24 @@ impl CodeBarApp {
         // Apply modern dark theme
         Self::apply_modern_theme(&cc.egui_ctx);
 
+        let needs_tunnel_setup = tunnel_manager
+            .lock()
+            .map(|manager| !manager.is_running())
+            .unwrap_or(true);
+
+        let mut tabs = TabStates::default();
+        if needs_tunnel_setup {
+            tabs.settings.open_cloudflare_setup();
+        }
+
         Self {
             state,
-            current_tab: Tab::Scans,
+            current_tab: if needs_tunnel_setup { Tab::Settings } else { Tab::Scans },
             cached_data: CachedData::default(),
             needs_refresh: true,
             runtime,
             server_addr,
-            tabs: TabStates::default(),
+            tabs,
             tunnel_manager,
         }
     }
